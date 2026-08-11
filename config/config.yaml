@@ -207,7 +207,7 @@ display:
 # 如以后需要飞书/邮件推送，再改为 true。
 # ===============================================================
 notification:
-  enabled: false
+  enabled: true
 
   channels:
     feishu:
