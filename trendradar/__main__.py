@@ -1010,32 +1010,146 @@ class NewsAnalyzer:
 
             # 构建 RSS 源配置
             feeds = []
+
             for feed_config in rss_feeds:
-                # 读取并验证单个 feed 的 max_age_days（可选）
+                # ----------------------------------------------------------
+                # max_age_days
+                # ----------------------------------------------------------
                 max_age_days_raw = feed_config.get("max_age_days")
                 max_age_days = None
+
                 if max_age_days_raw is not None:
                     try:
                         max_age_days = int(max_age_days_raw)
+
                         if max_age_days < 0:
                             feed_id = feed_config.get("id", "unknown")
-                            print(f"[警告] RSS feed '{feed_id}' 的 max_age_days 为负数，将使用全局默认值")
+
+                            print(
+                                f"[警告] RSS feed '{feed_id}' "
+                                "的 max_age_days 为负数，"
+                                "将使用全局默认值"
+                            )
+
                             max_age_days = None
+
                     except (ValueError, TypeError):
                         feed_id = feed_config.get("id", "unknown")
-                        print(f"[警告] RSS feed '{feed_id}' 的 max_age_days 格式错误：{max_age_days_raw}")
+
+                        print(
+                            f"[警告] RSS feed '{feed_id}' "
+                            "的 max_age_days 格式错误："
+                            f"{max_age_days_raw}"
+                        )
+
                         max_age_days = None
 
-                feed = RSSFeedConfig(
-                    id=feed_config.get("id", ""),
-                    name=feed_config.get("name", ""),
-                    url=feed_config.get("url", ""),
-                    max_items=feed_config.get("max_items", 50),
-                    enabled=feed_config.get("enabled", True),
-                    max_age_days=max_age_days,  # None=使用全局，0=禁用，>0=覆盖
+                # ----------------------------------------------------------
+                # allowed_authors
+                #
+                # TrendRadar 原版 __main__.py 在这里重新构造
+                # RSSFeedConfig，因此必须显式把自定义字段继续传下去。
+                # ----------------------------------------------------------
+                allowed_authors_raw = feed_config.get(
+                    "allowed_authors",
+                    [],
                 )
-                if feed.id and feed.url and feed.enabled:
+
+                if isinstance(allowed_authors_raw, str):
+                    allowed_authors = [
+                        allowed_authors_raw.strip()
+                    ] if allowed_authors_raw.strip() else []
+
+                elif isinstance(allowed_authors_raw, list):
+                    allowed_authors = [
+                        str(author).strip()
+                        for author in allowed_authors_raw
+                        if str(author).strip()
+                    ]
+
+                else:
+                    allowed_authors = []
+
+                # ----------------------------------------------------------
+                # ticket_enrich
+                # ----------------------------------------------------------
+                ticket_enrich_raw = feed_config.get(
+                    "ticket_enrich",
+                    False,
+                )
+
+                if isinstance(ticket_enrich_raw, bool):
+                    ticket_enrich = ticket_enrich_raw
+
+                elif isinstance(ticket_enrich_raw, str):
+                    ticket_enrich = (
+                        ticket_enrich_raw.strip().lower()
+                        in {
+                            "1",
+                            "true",
+                            "yes",
+                            "on",
+                        }
+                    )
+
+                else:
+                    ticket_enrich = bool(
+                        ticket_enrich_raw
+                    )
+
+                # ----------------------------------------------------------
+                # 创建 RSSFeedConfig
+                # ----------------------------------------------------------
+                feed = RSSFeedConfig(
+                    id=feed_config.get(
+                        "id",
+                        "",
+                    ),
+                    name=feed_config.get(
+                        "name",
+                        "",
+                    ),
+                    url=feed_config.get(
+                        "url",
+                        "",
+                    ),
+                    max_items=feed_config.get(
+                        "max_items",
+                        50,
+                    ),
+                    enabled=feed_config.get(
+                        "enabled",
+                        True,
+                    ),
+                    max_age_days=max_age_days,
+
+                    # 自定义扩展
+                    allowed_authors=allowed_authors,
+                    ticket_enrich=ticket_enrich,
+                )
+
+                if (
+                    feed.id
+                    and feed.url
+                    and feed.enabled
+                ):
                     feeds.append(feed)
+
+                    # ------------------------------------------------------
+                    # 调试日志：
+                    # 以后可以直接从 GitHub Actions 判断配置有没有传到运行时。
+                    # ------------------------------------------------------
+                    if (
+                        feed.allowed_authors
+                        or feed.ticket_enrich
+                    ):
+                        print(
+                            f"[RSS配置] {feed.name}: "
+                            f"allowed_authors="
+                            f"{feed.allowed_authors}, "
+                            f"ticket_enrich="
+                            f"{feed.ticket_enrich}"
+                        )
 
             if not feeds:
                 print("[RSS] 没有启用的 RSS 源")
