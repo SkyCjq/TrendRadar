@@ -452,7 +452,7 @@ rss:
 # Prompt 会明确禁止把“daily 数据”伪称为已完整覆盖过去48小时。
 # ===============================================================
 report:
-  mode: "daily"
+  mode: "incremental"
 
   display_mode: "keyword"
 
@@ -509,7 +509,7 @@ display:
     standalone: true
 
     ai_analysis: true
-
+    
   standalone:
 
     # 热榜平台不需要强制完整输入
@@ -653,14 +653,17 @@ ai_analysis:
 
   prompt_file: "ai_analysis_prompt.txt"
 
-  # TrendRadar 当前原生最接近完整累计的模式。
-  mode: "daily"
+  # 跟随 report.mode。
+  # 因为 report.mode 已经是 incremental，
+  # 所以 AI 也只分析增量内容。
+  mode: "follow_report"
 
   # 附件建议 AI 2-5条、篮球4-10条，
   # 但为了发现弱信号和赛果，不把输入限制得过低。
   max_news_for_analysis: 300
 
   include_rss: true
+  
   include_standalone: true
 
   include_rank_timeline: true
