@@ -1,4 +1,5 @@
 # coding=utf-8
+
 """
 RSS 抓取器
 
@@ -11,21 +12,24 @@ from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from .parser import RSSParser
 from trendradar.storage.base import RSSItem, RSSData
-from trendradar.utils.time import get_configured_time, is_within_days, DEFAULT_TIMEZONE
+from trendradar.utils.time import get_configured_time, DEFAULT_TIMEZONE
 
 
 @dataclass
 class RSSFeedConfig:
     """RSS 源配置"""
-    id: str                     # 源 ID
-    name: str                   # 显示名称
-    url: str                    # RSS URL
-    max_items: int = 0          # 最大条目数（0=不限制）
-    enabled: bool = True        # 是否启用
-    max_age_days: Optional[int] = None  # 文章最大年龄（天），覆盖全局设置；None=使用全局，0=禁用过滤
+
+    id: str
+    name: str
+    url: str
+    max_items: int = 0
+    enabled: bool = True
+    max_age_days: Optional[int] = None
 
 
 class RSSFetcher:
@@ -68,124 +72,138 @@ class RSSFetcher:
         self.session = self._create_session()
 
     def _create_session(self) -> requests.Session:
-    """创建请求会话"""
-
-    from requests.adapters import HTTPAdapter
-    from urllib3.util.retry import Retry
-
-    session = requests.Session()
-
-    # 使用常规浏览器 UA。
-    # 一些 RSS 代理、CDN、Cloudflare/WAF 会对非常规 UA
-    # 与浏览器 UA 返回不同结果。
-    session.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept": (
-            "application/rss+xml, "
-            "application/atom+xml, "
-            "application/xml;q=0.9, "
-            "text/xml;q=0.9, "
-            "*/*;q=0.8"
-        ),
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-    })
-
-    # RSSHub 等公共实例偶发 429 / 5xx。
-    # 自动重试并采用指数退避。
-    retry = Retry(
-        total=4,
-        connect=4,
-        read=4,
-        status=4,
-        backoff_factor=2,
-        status_forcelist=[
-            429,
-            500,
-            502,
-            503,
-            504,
-        ],
-        allowed_methods=["GET"],
-        respect_retry_after_header=True,
-    )
-
-    adapter = HTTPAdapter(
-        max_retries=retry,
-        pool_connections=10,
-        pool_maxsize=10,
-    )
-
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-
-    if self.use_proxy and self.proxy_url:
-        session.proxies = {
-            "http": self.proxy_url,
-            "https": self.proxy_url,
-        }
-
-    return session
-
-    def fetch_feed(self, feed: RSSFeedConfig) -> Tuple[List[RSSItem], Optional[str]]:
         """
-        抓取单个 RSS 源
+        创建请求会话。
+
+        对 RSSHub 等公共 RSS 服务：
+        - 使用常规浏览器 User-Agent；
+        - 对 429 / 5xx 自动重试；
+        - 尊重 Retry-After；
+        - 支持代理。
+        """
+
+        session = requests.Session()
+
+        session.headers.update(
+            {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+                "Accept": (
+                    "application/rss+xml, "
+                    "application/atom+xml, "
+                    "application/xml;q=0.9, "
+                    "text/xml;q=0.9, "
+                    "*/*;q=0.8"
+                ),
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+            }
+        )
+
+        retry = Retry(
+            total=4,
+            connect=4,
+            read=4,
+            status=4,
+            backoff_factor=2,
+            status_forcelist=[
+                429,
+                500,
+                502,
+                503,
+                504,
+            ],
+            allowed_methods=frozenset(["GET"]),
+            respect_retry_after_header=True,
+        )
+
+        adapter = HTTPAdapter(
+            max_retries=retry,
+            pool_connections=10,
+            pool_maxsize=10,
+        )
+
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+
+        if self.use_proxy and self.proxy_url:
+            session.proxies = {
+                "http": self.proxy_url,
+                "https": self.proxy_url,
+            }
+
+        return session
+
+    def fetch_feed(
+        self,
+        feed: RSSFeedConfig,
+    ) -> Tuple[List[RSSItem], Optional[str]]:
+        """
+        抓取单个 RSS 源。
 
         Args:
             feed: RSS 源配置
 
         Returns:
-            (条目列表, 错误信息) 元组
+            (条目列表, 错误信息)
         """
+
         try:
-response = self.session.get(
-    feed.url,
-    timeout=(10, self.timeout),
-    allow_redirects=True,
-)
+            response = self.session.get(
+                feed.url,
+                timeout=(10, self.timeout),
+                allow_redirects=True,
+            )
 
-response.raise_for_status()
+            response.raise_for_status()
 
-content_type = (
-    response.headers.get("Content-Type", "")
-    .lower()
-)
+            content_type = response.headers.get(
+                "Content-Type",
+                "",
+            ).lower()
 
-content = response.text
+            content = response.text
+            stripped = content.lstrip().lower()
 
-stripped = content.lstrip().lower()
+            # RSS / Atom / JSON Feed 基本识别
+            #
+            # 注意：
+            # 这里必须是 "<?xml"、"<rss"、"<feed"
+            # 不能写成 "\<?xml"、"\<rss"。
+            looks_like_feed = (
+                stripped.startswith("<?xml")
+                or stripped.startswith("<rss")
+                or stripped.startswith("<feed")
+                or stripped.startswith("{")
+            )
 
-looks_like_feed = (
-    stripped.startswith("<?xml")
-    or stripped.startswith("<rss")
-    or stripped.startswith("<feed")
-    or stripped.startswith("{")
-)
+            if not looks_like_feed:
+                raise ValueError(
+                    "返回内容不是 RSS/Atom/JSON Feed；"
+                    f"status={response.status_code}, "
+                    f"content_type={content_type}, "
+                    f"final_url={response.url}, "
+                    f"preview={content[:200]!r}"
+                )
 
-if not looks_like_feed:
-    raise ValueError(
-        "返回内容不是 RSS/Atom/JSON Feed；"
-        f"status={response.status_code}, "
-        f"content_type={content_type}, "
-        f"final_url={response.url}, "
-        f"preview={content[:200]!r}"
-    )
+            parsed_items = self.parser.parse(
+                content,
+                feed.url,
+            )
 
-parsed_items = self.parser.parse(content, feed.url)
-
-            # 限制条目数量（0=不限制）
+            # 限制条目数量
+            # 0 = 不限制
             if feed.max_items > 0:
-                parsed_items = parsed_items[:feed.max_items]
+                parsed_items = parsed_items[: feed.max_items]
 
-            # 转换为 RSSItem（使用配置的时区）
             now = get_configured_time(self.timezone)
             crawl_time = now.strftime("%H:%M")
-            items = []
+
+            items: List[RSSItem] = []
 
             for parsed in parsed_items:
                 item = RSSItem(
@@ -202,11 +220,18 @@ parsed_items = self.parser.parse(content, feed.url)
                     last_time=crawl_time,
                     count=1,
                 )
+
                 items.append(item)
 
-            # 注意：新鲜度过滤已移至推送阶段（_convert_rss_items_to_list）
-            # 这样所有文章都会存入数据库，但旧文章不会推送
-            print(f"[RSS] {feed.name}: 获取 {len(items)} 条")
+            # 新鲜度过滤由 TrendRadar 后续阶段处理。
+            # 抓取层尽量完整保存 RSS 数据。
+            print(
+                f"[RSS] {feed.name}: "
+                f"获取 {len(items)} 条 "
+                f"(status={response.status_code}, "
+                f"content-type={content_type})"
+            )
+
             return items, None
 
         except requests.Timeout:
@@ -225,34 +250,47 @@ parsed_items = self.parser.parse(content, feed.url)
             return [], error
 
         except Exception as e:
-            error = f"未知错误: {e}"
+            error = f"未知错误: {type(e).__name__}: {e}"
             print(f"[RSS] {feed.name}: {error}")
             return [], error
 
     def fetch_all(self) -> RSSData:
         """
-        抓取所有 RSS 源
+        抓取所有 RSS 源。
 
         Returns:
             RSSData 对象
         """
+
         all_items: Dict[str, List[RSSItem]] = {}
         id_to_name: Dict[str, str] = {}
         failed_ids: List[str] = []
 
-        # 使用配置的时区
         now = get_configured_time(self.timezone)
         crawl_time = now.strftime("%H:%M")
         crawl_date = now.strftime("%Y-%m-%d")
 
-        print(f"[RSS] 开始抓取 {len(self.feeds)} 个 RSS 源...")
+        print(
+            f"[RSS] 开始抓取 {len(self.feeds)} 个 RSS 源..."
+        )
 
         for i, feed in enumerate(self.feeds):
-            # 请求间隔（带随机波动）
+            # 请求间隔 + 少量随机抖动
+            # 减少同一个 RSSHub 公共实例的瞬时压力
             if i > 0:
                 interval = self.request_interval / 1000
-                jitter = random.uniform(-0.2, 0.2) * interval
-                time.sleep(interval + jitter)
+
+                jitter = random.uniform(
+                    -0.2,
+                    0.2,
+                ) * interval
+
+                sleep_time = max(
+                    0,
+                    interval + jitter,
+                )
+
+                time.sleep(sleep_time)
 
             items, error = self.fetch_feed(feed)
 
@@ -260,11 +298,27 @@ parsed_items = self.parser.parse(content, feed.url)
 
             if error:
                 failed_ids.append(feed.id)
+
             else:
                 all_items[feed.id] = items
 
-        total_items = sum(len(items) for items in all_items.values())
-        print(f"[RSS] 抓取完成: {len(all_items)} 个源成功, {len(failed_ids)} 个失败, 共 {total_items} 条")
+        total_items = sum(
+            len(items)
+            for items in all_items.values()
+        )
+
+        print(
+            "[RSS] 抓取完成: "
+            f"{len(all_items)} 个源成功, "
+            f"{len(failed_ids)} 个失败, "
+            f"共 {total_items} 条"
+        )
+
+        if failed_ids:
+            print(
+                "[RSS] 失败源 ID: "
+                + ", ".join(failed_ids)
+            )
 
         return RSSData(
             date=crawl_date,
@@ -275,67 +329,149 @@ parsed_items = self.parser.parse(content, feed.url)
         )
 
     @classmethod
-    def from_config(cls, config: Dict) -> "RSSFetcher":
+    def from_config(
+        cls,
+        config: Dict,
+    ) -> "RSSFetcher":
         """
-        从配置字典创建抓取器
+        从配置字典创建抓取器。
 
         Args:
-            config: 配置字典，格式如下：
+            config:
                 {
-                    "enabled": true,
+                    "enabled": True,
                     "request_interval": 2000,
+                    "timeout": 15,
                     "freshness_filter": {
-                        "enabled": true,
+                        "enabled": True,
                         "max_age_days": 3
                     },
                     "feeds": [
-                        {"id": "hacker-news", "name": "Hacker News", "url": "...", "max_age_days": 1}
+                        {
+                            "id": "hacker-news",
+                            "name": "Hacker News",
+                            "url": "...",
+                            "max_age_days": 1
+                        }
                     ]
                 }
 
         Returns:
             RSSFetcher 实例
         """
-        # 读取新鲜度过滤配置
-        freshness_config = config.get("freshness_filter", {})
-        freshness_enabled = freshness_config.get("enabled", True)  # 默认启用
-        default_max_age_days = freshness_config.get("max_age_days", 3)  # 默认3天
 
-        feeds = []
-        for feed_config in config.get("feeds", []):
-            # 读取并验证单个 feed 的 max_age_days（可选）
-            max_age_days_raw = feed_config.get("max_age_days")
+        freshness_config = config.get(
+            "freshness_filter",
+            {},
+        )
+
+        freshness_enabled = freshness_config.get(
+            "enabled",
+            True,
+        )
+
+        default_max_age_days = freshness_config.get(
+            "max_age_days",
+            3,
+        )
+
+        feeds: List[RSSFeedConfig] = []
+
+        for feed_config in config.get(
+            "feeds",
+            [],
+        ):
+            max_age_days_raw = feed_config.get(
+                "max_age_days"
+            )
+
             max_age_days = None
+
             if max_age_days_raw is not None:
                 try:
-                    max_age_days = int(max_age_days_raw)
+                    max_age_days = int(
+                        max_age_days_raw
+                    )
+
                     if max_age_days < 0:
-                        feed_id = feed_config.get("id", "unknown")
-                        print(f"[警告] RSS feed '{feed_id}' 的 max_age_days 为负数，将使用全局默认值")
+                        feed_id = feed_config.get(
+                            "id",
+                            "unknown",
+                        )
+
+                        print(
+                            "[警告] "
+                            f"RSS feed '{feed_id}' "
+                            "的 max_age_days 为负数，"
+                            "将使用全局默认值"
+                        )
+
                         max_age_days = None
+
                 except (ValueError, TypeError):
-                    feed_id = feed_config.get("id", "unknown")
-                    print(f"[警告] RSS feed '{feed_id}' 的 max_age_days 格式错误：{max_age_days_raw}")
+                    feed_id = feed_config.get(
+                        "id",
+                        "unknown",
+                    )
+
+                    print(
+                        "[警告] "
+                        f"RSS feed '{feed_id}' "
+                        "的 max_age_days 格式错误："
+                        f"{max_age_days_raw}"
+                    )
+
                     max_age_days = None
 
             feed = RSSFeedConfig(
-                id=feed_config.get("id", ""),
-                name=feed_config.get("name", ""),
-                url=feed_config.get("url", ""),
-                max_items=feed_config.get("max_items", 0),  # 0=不限制
-                enabled=feed_config.get("enabled", True),
-                max_age_days=max_age_days,  # None=使用全局，0=禁用，>0=覆盖
+                id=feed_config.get(
+                    "id",
+                    "",
+                ),
+                name=feed_config.get(
+                    "name",
+                    "",
+                ),
+                url=feed_config.get(
+                    "url",
+                    "",
+                ),
+                max_items=feed_config.get(
+                    "max_items",
+                    0,
+                ),
+                enabled=feed_config.get(
+                    "enabled",
+                    True,
+                ),
+                max_age_days=max_age_days,
             )
+
             if feed.id and feed.url:
                 feeds.append(feed)
 
         return cls(
             feeds=feeds,
-            request_interval=config.get("request_interval", 2000),
-            timeout=config.get("timeout", 15),
-            use_proxy=config.get("use_proxy", False),
-            proxy_url=config.get("proxy_url", ""),
-            timezone=config.get("timezone", DEFAULT_TIMEZONE),
+            request_interval=config.get(
+                "request_interval",
+                2000,
+            ),
+            timeout=config.get(
+                "timeout",
+                15,
+            ),
+            use_proxy=config.get(
+                "use_proxy",
+                False,
+            ),
+            proxy_url=config.get(
+                "proxy_url",
+                "",
+            ),
+            timezone=config.get(
+                "timezone",
+                DEFAULT_TIMEZONE,
+            ),
             freshness_enabled=freshness_enabled,
             default_max_age_days=default_max_age_days,
         )
