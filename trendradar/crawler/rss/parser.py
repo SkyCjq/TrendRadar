@@ -24,12 +24,30 @@ except ImportError:
 @dataclass
 class ParsedRSSItem:
     """解析后的 RSS 条目"""
+
     title: str
     url: str
+
     published_at: Optional[str] = None
+
+    # TrendRadar 原有的纯文本摘要
     summary: Optional[str] = None
+
     author: Optional[str] = None
     guid: Optional[str] = None
+
+    # ----------------------------------------------------------
+    # 新增：
+    # RSS 原始 description / summary HTML。
+    #
+    # 用于提取：
+    # <a href="...">
+    # t.cn 短链
+    # 大麦 / 票星球 / 看个比赛项目链接
+    #
+    # 不直接进入最终正常 RSS 摘要。
+    # ----------------------------------------------------------
+    raw_summary: Optional[str] = None
 
 
 class RSSParser:
