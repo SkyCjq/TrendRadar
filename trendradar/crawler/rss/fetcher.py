@@ -904,17 +904,30 @@ class RSSFetcher:
         feed: RSSFeedConfig,
         title: str,
         summary: str,
+        raw_summary: str = "",
     ) -> str:
         """
-        对票务相关微博跟随真实项目链接。
+        票务内容增强。
 
-        单条微博最多成功抓2个项目页，
-        防止产生大量额外HTTP请求。
+        summary:
+            TrendRadar 已清洗的纯文本摘要，
+            用于判断是否属于票务内容。
+
+        raw_summary:
+            RSS 原始 HTML description，
+            用于寻找 href / t.cn / 项目页链接。
+
+        返回值：
+            始终保持纯文本 summary 为主体，
+            只有抓到真实票务项目页时才追加证据。
         """
 
         if not feed.ticket_enrich:
             return summary
 
+        # ------------------------------------------------------
+        # Step 1：判断是不是需要票务增强的内容
+        # ------------------------------------------------------
         if not self._is_ticket_context(
             feed,
             title,
@@ -922,17 +935,50 @@ class RSSFetcher:
         ):
             return summary
 
+        print(
+            f"[票务检测] {feed.name}: "
+            f"命中票务内容 -> "
+            f"{title[:80]}"
+        )
+
+        # ------------------------------------------------------
+        # Step 2：
+        # 必须从 raw_summary 提取链接。
+        #
+        # parsed.summary 中 HTML 已经被 RSSParser 删除。
+        # ------------------------------------------------------
+        link_source = (
+            raw_summary
+            or summary
+        )
+
         links = self._extract_links(
-            summary
+            link_source
+        )
+
+        print(
+            f"[票务检测] {feed.name}: "
+            f"发现 {len(links)} 个原始链接"
         )
 
         if not links:
+            print(
+                f"[票务检测] {feed.name}: "
+                "RSS 原始正文没有可跟随的 HTTP 链接"
+            )
+
             return summary
 
         evidence: List[str] = []
 
-        # 最多尝试前6个外链
-        for link in links[:6]:
+        # 最多尝试 8 个 URL，
+        # 最多保存 2 个真正有效的项目页。
+        for link in links[:8]:
+            print(
+                "[票务检测] "
+                f"尝试外链 -> {link}"
+            )
+
             item = (
                 self._fetch_ticket_page(
                     link
@@ -942,25 +988,39 @@ class RSSFetcher:
             if not item:
                 continue
 
-            evidence.append(item)
+            evidence.append(
+                item
+            )
 
-            # 最多真正收录2个项目页
             if len(evidence) >= 2:
                 break
 
         if not evidence:
+            print(
+                f"[票务检测] {feed.name}: "
+                "发现链接，但没有获得可读取的真实票务项目页"
+            )
+
             return summary
 
         appendix = "\n\n".join(
             (
                 "[真实票务项目页证据 "
-                f"{index}] {item}"
+                f"{index}] "
+                f"{item}"
             )
             for index, item
             in enumerate(
                 evidence,
                 start=1,
             )
+        )
+
+        print(
+            f"[票务检测] {feed.name}: "
+            f"成功补充 "
+            f"{len(evidence)} "
+            "个真实项目页"
         )
 
         return (
@@ -970,7 +1030,6 @@ class RSSFetcher:
             "==========\n"
             f"{appendix}"
         )
-
     def fetch_feed(
         self,
         feed: RSSFeedConfig,
