@@ -380,9 +380,11 @@ rss:
 
     - id: "ticket-piaoxingqiu-official"
       name: "票星球官方票务"
-      url: "https://rsshub.rss3.workers.dev/weibo/user/7340154515"
+      url: "https://rsshub.rss3.workers.dev/weibo/keyword/票星球"
       max_age_days: 7
       max_items: 20
+      allowed_authors:
+        - "票星球"
       ticket_enrich: true
 
     - id: "ticket-kangebisai-official"
