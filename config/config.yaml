@@ -251,27 +251,21 @@ rss:
       ticket_enrich: true
 
     # 9 山东高速
-    # 当前无法安全确认 numeric UID，因此仅接受官方作者。
+    # 山东高速 / 山东山高篮球俱乐部官方微博
     - id: "cba-shandong"
       name: "山东高速篮球俱乐部"
-      url: "https://rsshub.rss3.workers.dev/weibo/keyword/山东高速篮球俱乐部"
+      url: "https://rsshub.rss3.workers.dev/weibo/user/5167501876"
       max_age_days: 2
       max_items: 10
-      allowed_authors:
-        - "山东高速篮球俱乐部"
-        - "山东山高篮球俱乐部"
       ticket_enrich: true
 
     # 10 山西汾酒
-    # 当前无法安全确认 numeric UID，因此仅接受官方作者。
+    # 山西汾酒职业篮球俱乐部官方微博
     - id: "cba-shanxi"
       name: "山西汾酒职业篮球俱乐部"
-      url: "https://rsshub.rss3.workers.dev/weibo/keyword/山西汾酒职业篮球俱乐部"
+      url: "https://rsshub.rss3.workers.dev/weibo/user/1893575167"
       max_age_days: 2
       max_items: 10
-      allowed_authors:
-        - "山西汾酒职业篮球俱乐部"
-        - "山西国投职业篮球俱乐部"
       ticket_enrich: true
 
     # 11 青岛国信海天
