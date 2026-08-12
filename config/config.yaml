@@ -380,6 +380,7 @@ rss:
       allowed_authors:
         - "票星球"
       ticket_enrich: true
+      enabled: false
 
     - id: "ticket-kangebisai-official"
       name: "看个比赛官方票务"
