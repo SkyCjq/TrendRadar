@@ -231,40 +231,125 @@ class RSSParser:
 
         return self.parse(response.text, url)
 
-    def _parse_entry(self, entry: Any) -> Optional[ParsedRSSItem]:
-        """解析单个条目"""
-        title = self._clean_text(entry.get("title", ""))
+    def _parse_entry(
+        self,
+        entry: Any,
+    ) -> Optional[ParsedRSSItem]:
+        """解析单个 RSS / Atom 条目"""
 
-        url = entry.get("link", "")
+        title = self._clean_text(
+            entry.get(
+                "title",
+                "",
+            )
+        )
+
+        url = entry.get(
+            "link",
+            "",
+        )
+
         if not url:
-            links = entry.get("links", [])
+            links = entry.get(
+                "links",
+                [],
+            )
+
             for link in links:
-                if link.get("rel") == "alternate" or link.get("type", "").startswith("text/html"):
-                    url = link.get("href", "")
+                if (
+                    link.get("rel")
+                    == "alternate"
+                    or link.get(
+                        "type",
+                        "",
+                    ).startswith(
+                        "text/html"
+                    )
+                ):
+                    url = link.get(
+                        "href",
+                        "",
+                    )
                     break
-            if not url and links:
-                url = links[0].get("href", "")
+
+            if (
+                not url
+                and links
+            ):
+                url = links[0].get(
+                    "href",
+                    "",
+                )
+
+        # ------------------------------------------------------
+        # 这里必须在 _clean_text() 之前保留原始 HTML。
+        # ------------------------------------------------------
+        raw_summary = (
+            self._get_raw_summary(
+                entry
+            )
+        )
 
         if not title:
-            raw_summary = entry.get("summary") or entry.get("description", "")
-            if not raw_summary:
-                content = entry.get("content", [])
-                if content and isinstance(content, list):
-                    raw_summary = content[0].get("value", "")
             if raw_summary:
-                title = self._clean_text(raw_summary)
+                title = (
+                    self._clean_text(
+                        raw_summary
+                    )
+                )
+
                 if len(title) > 20:
-                    title = title[:20] + "..."
-            if not title and url:
+                    title = (
+                        title[:20]
+                        + "..."
+                    )
+
+            if (
+                not title
+                and url
+            ):
                 title = url
 
         if not title:
             return None
 
-        published_at = self._parse_date(entry)
-        summary = self._parse_summary(entry)
-        author = self._parse_author(entry)
-        guid = entry.get("id") or entry.get("guid", {}).get("value") or url
+        published_at = (
+            self._parse_date(
+                entry
+            )
+        )
+
+        summary = (
+            self._parse_summary(
+                entry
+            )
+        )
+
+        author = (
+            self._parse_author(
+                entry
+            )
+        )
+
+        guid_value = entry.get(
+            "guid"
+        )
+
+        if isinstance(
+            guid_value,
+            dict,
+        ):
+            guid_value = (
+                guid_value.get(
+                    "value"
+                )
+            )
+
+        guid = (
+            entry.get("id")
+            or guid_value
+            or url
+        )
 
         return ParsedRSSItem(
             title=title,
@@ -273,8 +358,14 @@ class RSSParser:
             summary=summary,
             author=author,
             guid=guid,
-        )
 
+            # 新增
+            raw_summary=(
+                raw_summary
+                or None
+            ),
+        )
+        
     def _clean_text(self, text: str) -> str:
         """清理文本"""
         if not text:
@@ -320,7 +411,51 @@ class RSSParser:
                 pass
 
         return None
+        
+    def _get_raw_summary(
+        self,
+        entry: Any,
+    ) -> str:
+        """
+        获取未经 HTML 清洗的原始摘要。
 
+        TrendRadar 正常 summary 仍会走 _clean_text()；
+        此字段仅供 ticket_enrich 提取 href 使用。
+        """
+
+        raw_summary = (
+            entry.get("summary")
+            or entry.get("description", "")
+        )
+
+        if not raw_summary:
+            content = entry.get(
+                "content",
+                [],
+            )
+
+            if (
+                content
+                and isinstance(content, list)
+            ):
+                raw_summary = (
+                    content[0].get(
+                        "value",
+                        "",
+                    )
+                )
+
+        if not raw_summary:
+            return ""
+
+        raw_summary = str(
+            raw_summary
+        )
+
+        # 避免异常超大 HTML 被长期保存在对象里。
+        # 足够覆盖微博 description 和购票外链。
+        return raw_summary[:20000]
+        
     def _parse_summary(self, entry: Any) -> Optional[str]:
         """解析摘要"""
         summary = entry.get("summary") or entry.get("description", "")
