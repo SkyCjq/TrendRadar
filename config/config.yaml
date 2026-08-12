@@ -602,11 +602,15 @@ storage:
 
   local:
     data_dir: "output"
-    retention_days: 0
+    retention_days: 30
 
   remote:
-    retention_days: 0
+    # 保留 30 天数据。
+    # 对你的 48 小时新闻 + 7 天票务窗口已经足够，
+    # 同时可以控制长期存储增长。
+    retention_days: 30
 
+    # 敏感信息全部通过 GitHub Secrets 注入。
     endpoint_url: ""
     bucket_name: ""
     access_key_id: ""
