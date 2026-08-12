@@ -135,27 +135,27 @@ rss:
     - id: "china-basketball-association"
       name: "中国篮球协会官方微博"
       url: "https://rsshub.app/weibo/user/6407426882"
-      max_age_days: 2
+      max_age_days: 0
 
     - id: "china-basketball-team"
       name: "中国篮球之队官方微博"
       url: "https://rsshub.app/weibo/user/7103510112"
-      max_age_days: 2
+      max_age_days: 0
 
     - id: "cba-official"
       name: "CBA联赛官方微博"
       url: "https://rsshub.app/weibo/user/6351694466"
-      max_age_days: 2
+      max_age_days: 0
 
     - id: "wcba-official"
       name: "WCBA联赛官方微博"
       url: "https://rsshub.app/weibo/user/6722173158"
-      max_age_days: 2
+      max_age_days: 0
 
     - id: "nbl-official"
       name: "NBL全国男子篮球联赛官方微博"
       url: "https://rsshub.app/weibo/user/7753547890"
-      max_age_days: 2
+      max_age_days: 0
 
 
     # ==========================================================
@@ -174,47 +174,47 @@ rss:
     - id: "cba-liaoning-search"
       name: "微博检索｜辽宁男篮"
       url: "https://rsshub.app/weibo/keyword/辽宁男篮"
-      max_age_days: 2
+      max_age_days: 0
 
     - id: "cba-xinjiang-search"
       name: "微博检索｜新疆男篮"
       url: "https://rsshub.app/weibo/keyword/新疆男篮"
-      max_age_days: 2
+      max_age_days: 0
 
     - id: "cba-guangdong-search"
       name: "微博检索｜广东男篮"
       url: "https://rsshub.app/weibo/keyword/广东男篮"
-      max_age_days: 2
+      max_age_days: 0
 
     - id: "cba-guangsha-search"
       name: "微博检索｜浙江广厦"
       url: "https://rsshub.app/weibo/keyword/浙江广厦"
-      max_age_days: 2
+      max_age_days: 0
 
     - id: "cba-chouzhou-search"
       name: "微博检索｜浙江稠州"
       url: "https://rsshub.app/weibo/keyword/浙江稠州"
-      max_age_days: 2
+      max_age_days: 0
 
     - id: "cba-beijing-search"
       name: "微博检索｜北京首钢"
       url: "https://rsshub.app/weibo/keyword/北京首钢"
-      max_age_days: 2
+      max_age_days: 0
 
     - id: "cba-beikong-search"
       name: "微博检索｜北京控股男篮"
       url: "https://rsshub.app/weibo/keyword/北控男篮"
-      max_age_days: 2
+      max_age_days: 0
 
     - id: "cba-shanghai-search"
       name: "微博检索｜上海男篮"
       url: "https://rsshub.app/weibo/keyword/上海男篮"
-      max_age_days: 2
+      max_age_days: 0
 
     - id: "cba-shandong-search"
       name: "微博检索｜山东男篮"
       url: "https://rsshub.app/weibo/keyword/山东男篮"
-      max_age_days: 2
+      max_age_days: 0
 
     - id: "cba-shanxi-search"
       name: "微博检索｜山西男篮"
@@ -224,52 +224,52 @@ rss:
     - id: "cba-qingdao-search"
       name: "微博检索｜青岛男篮"
       url: "https://rsshub.app/weibo/keyword/青岛男篮"
-      max_age_days: 2
+      max_age_days: 0
 
     - id: "cba-shenzhen-search"
       name: "微博检索｜深圳男篮"
       url: "https://rsshub.app/weibo/keyword/深圳男篮"
-      max_age_days: 2
+      max_age_days: 0
 
     - id: "cba-jilin-search"
       name: "微博检索｜吉林男篮"
       url: "https://rsshub.app/weibo/keyword/吉林男篮"
-      max_age_days: 2
+      max_age_days: 0
 
     - id: "cba-guangzhou-search"
       name: "微博检索｜广州龙狮"
       url: "https://rsshub.app/weibo/keyword/广州龙狮"
-      max_age_days: 2
+      max_age_days: 0
 
     - id: "cba-nanjing-search"
       name: "微博检索｜南京同曦"
       url: "https://rsshub.app/weibo/keyword/南京同曦"
-      max_age_days: 2
+      max_age_days: 0
 
     - id: "cba-tianjin-search"
       name: "微博检索｜天津男篮"
       url: "https://rsshub.app/weibo/keyword/天津男篮"
-      max_age_days: 2
+      max_age_days: 0
 
     - id: "cba-fujian-search"
       name: "微博检索｜福建男篮"
       url: "https://rsshub.app/weibo/keyword/福建男篮"
-      max_age_days: 2
+      max_age_days: 0
 
     - id: "cba-ningbo-search"
       name: "微博检索｜宁波男篮"
       url: "https://rsshub.app/weibo/keyword/宁波男篮"
-      max_age_days: 2
+      max_age_days: 0
 
     - id: "cba-sichuan-search"
       name: "微博检索｜四川男篮"
       url: "https://rsshub.app/weibo/keyword/四川男篮"
-      max_age_days: 2
+      max_age_days: 0
 
     - id: "cba-jiangsu-search"
       name: "微博检索｜江苏肯帝亚"
       url: "https://rsshub.app/weibo/keyword/江苏肯帝亚"
-      max_age_days: 2
+      max_age_days: 0
 
 
     # ==========================================================
