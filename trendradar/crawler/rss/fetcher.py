@@ -1171,6 +1171,28 @@ class RSSFetcher:
                     author_filtered += 1
                     continue
 
+                                # ----------------------------------------------------------
+                # 正常 summary：
+                #   已清洗纯文本，用于 TrendRadar 输出
+                #
+                # raw_summary：
+                #   parser 保留下来的 RSS 原始 HTML，
+                #   用于票务 href 提取
+                # ----------------------------------------------------------
+                clean_summary = (
+                    parsed.summary
+                    or ""
+                )
+
+                raw_summary = (
+                    getattr(
+                        parsed,
+                        "raw_summary",
+                        None,
+                    )
+                    or clean_summary
+                )
+
                 enriched_summary = (
                     self._enrich_ticket_summary(
                         feed=feed,
@@ -1178,10 +1200,8 @@ class RSSFetcher:
                             parsed.title
                             or ""
                         ),
-                        summary=(
-                            parsed.summary
-                            or ""
-                        ),
+                        summary=clean_summary,
+                        raw_summary=raw_summary,
                     )
                 )
 
