@@ -10,9 +10,11 @@ RSS 抓取器
    对 RSSHub keyword 结果做官方作者精确白名单过滤。
 
 2. ticket_enrich
-   对篮球票务相关微博中的外链进行跟随，
-   抓取真实票务项目页面，并把票价、开售时间、
-   实名、限购、退改、销售状态等证据追加到 RSSItem.summary。
+   对篮球票务相关微博中的外链进行跟随。
+
+3. 严格票务项目页识别
+   微博内部页、微博访客登录页、图片 CDN、普通媒体文章
+   不再被误判成“真实票务项目页”。
 """
 
 import html
@@ -38,6 +40,10 @@ from trendradar.utils.time import (
 )
 
 
+# ============================================================
+# RSS Feed 配置
+# ============================================================
+
 @dataclass
 class RSSFeedConfig:
     """RSS 源配置"""
@@ -45,21 +51,26 @@ class RSSFeedConfig:
     id: str
     name: str
     url: str
+
     max_items: int = 0
     enabled: bool = True
     max_age_days: Optional[int] = None
 
-    # keyword RSS 官方作者精确白名单
+    # keyword RSS 官方作者白名单
     allowed_authors: List[str] = field(
         default_factory=list
     )
 
-    # 是否抓取微博中的真实票务项目外链
+    # 是否对票务内容执行真实项目页增强
     ticket_enrich: bool = False
 
 
+# ============================================================
+# HTML 可见文字解析
+# ============================================================
+
 class _VisibleTextParser(HTMLParser):
-    """从 HTML 中提取可见文本"""
+    """从 HTML 中提取可见文字"""
 
     def __init__(self):
         super().__init__(
@@ -69,11 +80,7 @@ class _VisibleTextParser(HTMLParser):
         self._skip_depth = 0
         self._parts: List[str] = []
 
-    def handle_starttag(
-        self,
-        tag,
-        attrs,
-    ):
+    def handle_starttag(self, tag, attrs):
         if tag.lower() in {
             "script",
             "style",
@@ -82,10 +89,7 @@ class _VisibleTextParser(HTMLParser):
         }:
             self._skip_depth += 1
 
-    def handle_endtag(
-        self,
-        tag,
-    ):
+    def handle_endtag(self, tag):
         if (
             tag.lower()
             in {
@@ -98,23 +102,20 @@ class _VisibleTextParser(HTMLParser):
         ):
             self._skip_depth -= 1
 
-    def handle_data(
-        self,
-        data,
-    ):
-        if self._skip_depth == 0:
-            text = re.sub(
-                r"\s+",
-                " ",
-                data,
-            ).strip()
+    def handle_data(self, data):
+        if self._skip_depth != 0:
+            return
 
-            if text:
-                self._parts.append(text)
+        text = re.sub(
+            r"\s+",
+            " ",
+            data,
+        ).strip()
 
-    def get_text(
-        self,
-    ) -> str:
+        if text:
+            self._parts.append(text)
+
+    def get_text(self) -> str:
         text = " ".join(
             self._parts
         )
@@ -126,8 +127,16 @@ class _VisibleTextParser(HTMLParser):
         ).strip()
 
 
+# ============================================================
+# RSSFetcher
+# ============================================================
+
 class RSSFetcher:
     """RSS 抓取器"""
+
+    # --------------------------------------------------------
+    # RSSHub fallback
+    # --------------------------------------------------------
 
     RSSHUB_FALLBACK_FROM = (
         "https://rsshub.app/"
@@ -137,47 +146,111 @@ class RSSFetcher:
         "https://rsshub.rss3.workers.dev/"
     )
 
-    TICKET_WORDS = (
-        "售票",
+    # --------------------------------------------------------
+    # 票务词
+    #
+    # “门票”不能单独认为是售票。
+    #
+    # 例如：
+    #   “争夺总决赛门票”
+    #
+    # 实际表示晋级资格。
+    # --------------------------------------------------------
+
+    TICKET_STRONG_WORDS = (
         "购票",
-        "门票",
+        "售票",
         "开票",
         "票价",
-        "票档",
+        "票务",
+        "开售",
+        "预售",
+        "抢票",
         "余票",
         "售罄",
-        "抢票",
-        "预售",
-        "实名",
+        "实名购票",
+        "实名制",
         "退票",
-        "退款",
+        "退改",
         "限购",
+        "购票链接",
+        "购票渠道",
+        "购票平台",
         "票星球",
         "大麦",
         "看个比赛",
         "猫眼",
     )
 
-    BASKETBALL_WORDS = (
-        "篮球",
-        "CBA",
-        "WCBA",
-        "NBL",
-        "男篮",
-        "女篮",
-        "中国队",
-        "全明星",
-        "俱乐部杯",
+    TICKET_WEAK_WORDS = (
+        "门票",
     )
 
-    SKIP_LINK_HOST_KEYWORDS = (
-        "weibo.com",
-        "m.weibo.cn",
-        "video.weibo.com",
-        "weibocdn.com",
-        "sinaimg.cn",
-        "rsshub.",
+    TICKET_TRANSACTION_WORDS = (
+        "购买",
+        "购票",
+        "售票",
+        "票价",
+        "元",
+        "¥",
+        "￥",
+        "开售",
+        "预售",
+        "限购",
+        "实名",
     )
+
+    # --------------------------------------------------------
+    # 篮球语义词
+    # --------------------------------------------------------
+
+    BASKETBALL_WORDS = (
+        "篮球",
+        "cba",
+        "wcba",
+        "nbl",
+        "男篮",
+        "女篮",
+        "国青",
+        "u16",
+        "u18",
+        "u19",
+        "u21",
+        "篮协",
+        "全明星",
+        "俱乐部杯",
+        "三人篮球",
+        "超三",
+    )
+
+    # --------------------------------------------------------
+    # 真正票务平台页面常见交易词
+    #
+    # 用于避免：
+    # 新闻文章里仅仅提到“票星球”
+    # 就被误认为票星球项目页。
+    # --------------------------------------------------------
+
+    PAGE_TICKET_WORDS = (
+        "立即购票",
+        "立即购买",
+        "选择场次",
+        "选择票档",
+        "票价",
+        "开售",
+        "售票",
+        "实名",
+        "限购",
+        "退票",
+        "购买数量",
+        "缺货登记",
+        "暂无票",
+        "售罄",
+    )
+
+    # --------------------------------------------------------
+    # 初始化
+    # --------------------------------------------------------
 
     def __init__(
         self,
@@ -191,15 +264,12 @@ class RSSFetcher:
         default_max_age_days: int = 3,
     ):
         self.feeds = [
-            f
-            for f in feeds
-            if f.enabled
+            feed
+            for feed in feeds
+            if feed.enabled
         ]
 
-        self.request_interval = (
-            request_interval
-        )
-
+        self.request_interval = request_interval
         self.timeout = timeout
         self.use_proxy = use_proxy
         self.proxy_url = proxy_url
@@ -218,6 +288,10 @@ class RSSFetcher:
         self.session = (
             self._create_session()
         )
+
+    # ========================================================
+    # HTTP Session
+    # ========================================================
 
     def _create_session(
         self,
@@ -242,11 +316,11 @@ class RSSFetcher:
                     "application/xml;q=0.9, "
                     "text/xml;q=0.9, "
                     "text/html;q=0.8, "
+                    "application/json;q=0.8, "
                     "*/*;q=0.7"
                 ),
                 "Accept-Language": (
-                    "zh-CN,zh;q=0.9,"
-                    "en;q=0.8"
+                    "zh-CN,zh;q=0.9,en;q=0.8"
                 ),
                 "Cache-Control": "no-cache",
                 "Pragma": "no-cache",
@@ -259,6 +333,7 @@ class RSSFetcher:
             read=4,
             status=4,
             backoff_factor=2,
+
             status_forcelist=[
                 429,
                 500,
@@ -266,12 +341,14 @@ class RSSFetcher:
                 503,
                 504,
             ],
+
             allowed_methods=frozenset(
                 [
                     "GET",
                     "HEAD",
                 ]
             ),
+
             respect_retry_after_header=True,
         )
 
@@ -302,10 +379,16 @@ class RSSFetcher:
 
         return session
 
+    # ========================================================
+    # Author 白名单
+    # ========================================================
+
     @staticmethod
     def _normalize_author(
         author: str,
     ) -> str:
+        """标准化作者名"""
+
         return re.sub(
             r"\s+",
             "",
@@ -320,6 +403,8 @@ class RSSFetcher:
         feed: RSSFeedConfig,
         author: str,
     ) -> bool:
+        """检查 author 是否属于官方白名单"""
+
         if not feed.allowed_authors:
             return True
 
@@ -340,13 +425,17 @@ class RSSFetcher:
 
         return normalized in allowed
 
+    # ========================================================
+    # URL 提取
+    # ========================================================
+
     @staticmethod
     def _extract_links(
         fragment: str,
     ) -> List[str]:
         """
-        从 RSS description / summary
-        中提取 HTTP 外链
+        从 RSS 原始 description / summary
+        中提取 HTTP 链接。
         """
 
         if not fragment:
@@ -358,6 +447,10 @@ class RSSFetcher:
 
         links: List[str] = []
 
+        # ----------------------------------------------------
+        # HTML href
+        # ----------------------------------------------------
+
         for match in re.findall(
             r'href\s*=\s*["\']([^"\']+)["\']',
             decoded,
@@ -366,6 +459,10 @@ class RSSFetcher:
             links.append(
                 match.strip()
             )
+
+        # ----------------------------------------------------
+        # 纯文本 URL
+        # ----------------------------------------------------
 
         for match in re.findall(
             r'https?://[^\s<>"\']+',
@@ -377,6 +474,10 @@ class RSSFetcher:
                     ".,;，。；）)]}"
                 )
             )
+
+        # ----------------------------------------------------
+        # 去重
+        # ----------------------------------------------------
 
         result: List[str] = []
         seen = set()
@@ -398,79 +499,176 @@ class RSSFetcher:
 
         return result
 
+    # ========================================================
+    # 票务内容判断
+    # ========================================================
+
     def _is_ticket_context(
         self,
         feed: RSSFeedConfig,
         title: str,
         summary: str,
     ) -> bool:
+        """
+        判断当前条目是否真的属于篮球票务。
+
+        重要：
+        不再使用 feed.name 判断篮球属性。
+
+        否则：
+            票务专项｜大麦篮球
+        会让任何演唱会都天然带有“篮球”二字。
+        """
+
+        # 当前不用 feed.name。
+        # 保留参数只是兼容现有调用接口。
+        _ = feed
+
         text = (
-            f"{feed.name} "
-            f"{title} "
-            f"{summary}"
+            f"{title or ''} "
+            f"{summary or ''}"
         )
 
         text_lower = text.lower()
 
-        has_ticket = any(
-            word.lower()
-            in text_lower
-            for word
-            in self.TICKET_WORDS
-        )
+        # ----------------------------------------------------
+        # 是否篮球
+        # ----------------------------------------------------
 
         has_basketball = any(
-            word.lower()
-            in text_lower
-            for word
-            in self.BASKETBALL_WORDS
+            word.lower() in text_lower
+            for word in self.BASKETBALL_WORDS
         )
 
-        # 篮协、联盟、俱乐部：
-        # 只要明确出现购票类词即可抓。
-        if feed.id.startswith(
-            (
-                "cba-",
-                "china-basketball",
-                "wcba-",
-                "nbl-",
+        if not has_basketball:
+            return False
+
+        # ----------------------------------------------------
+        # 强票务语义
+        # ----------------------------------------------------
+
+        has_strong_ticket = any(
+            word.lower() in text_lower
+            for word
+            in self.TICKET_STRONG_WORDS
+        )
+
+        # ----------------------------------------------------
+        # 弱票务语义
+        # ----------------------------------------------------
+
+        has_weak_ticket = any(
+            word.lower() in text_lower
+            for word
+            in self.TICKET_WEAK_WORDS
+        )
+
+        has_transaction = any(
+            word.lower() in text_lower
+            for word
+            in self.TICKET_TRANSACTION_WORDS
+        )
+
+        has_ticket = (
+            has_strong_ticket
+            or (
+                has_weak_ticket
+                and has_transaction
             )
-        ):
-            return has_ticket
+        )
 
-        # 票务平台：
-        # 必须同时满足票务 + 篮球，
-        # 防止演唱会等内容进入项目页抓取。
-        if feed.id.startswith(
-            "ticket-"
-        ):
-            return (
-                has_ticket
-                and has_basketball
-            )
+        return has_ticket
 
-        return False
+    # ========================================================
+    # URL 过滤
+    # ========================================================
 
-    def _should_skip_final_url(
-        self,
+    @staticmethod
+    def _is_static_asset_url(
         url: str,
     ) -> bool:
+        """是否图片/视频/JS/CSS等静态资源"""
+
+        path = (
+            urlparse(url).path
+            or ""
+        ).lower()
+
+        static_extensions = (
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".gif",
+            ".webp",
+            ".svg",
+            ".mp4",
+            ".mov",
+            ".m3u8",
+            ".css",
+            ".js",
+            ".woff",
+            ".woff2",
+            ".ttf",
+            ".ico",
+        )
+
+        return path.endswith(
+            static_extensions
+        )
+
+    @staticmethod
+    def _is_weibo_or_sina_url(
+        url: str,
+    ) -> bool:
+        """
+        排除：
+
+        weibo.com
+        m.weibo.cn
+        visitor.passport.weibo.cn
+        新浪图片 CDN
+        微博视频页
+
+        它们不是票务项目页面。
+        """
+
         host = (
             urlparse(url).hostname
             or ""
         ).lower()
 
-        return any(
-            keyword in host
-            for keyword
-            in self.SKIP_LINK_HOST_KEYWORDS
+        blocked_hosts = (
+            "weibo.com",
+            "weibo.cn",
+            "sinaimg.cn",
+            "weibocdn.com",
+            "passport.weibo.cn",
+            "visitor.passport.weibo.cn",
+            "h5.sinaimg.cn",
+            "n.sinaimg.cn",
+            "video.weibo.com",
         )
+
+        return any(
+            host == blocked
+            or host.endswith(
+                "." + blocked
+            )
+            for blocked
+            in blocked_hosts
+        )
+
+    # ========================================================
+    # HTML → 可见正文
+    # ========================================================
 
     @staticmethod
     def _extract_visible_text(
         content: str,
-        limit: int = 5000,
+        limit: int = 6000,
     ) -> str:
+        """提取网页可见正文"""
+
         parser = _VisibleTextParser()
 
         try:
@@ -499,11 +697,120 @@ class RSSFetcher:
 
         return text[:limit]
 
+    # ========================================================
+    # 真正票务平台识别
+    # ========================================================
+
+    def _detect_ticket_platform(
+        self,
+        final_url: str,
+        visible_text: str,
+    ) -> Optional[str]:
+        """
+        判断最终页面是否确实属于票务平台。
+
+        返回：
+            大麦
+            票星球
+            猫眼
+            看个比赛
+            None
+        """
+
+        host = (
+            urlparse(final_url).hostname
+            or ""
+        ).lower()
+
+        text = (
+            visible_text
+            or ""
+        )[:6000].lower()
+
+        # ----------------------------------------------------
+        # 大麦
+        # 域名证据本身足够强。
+        # ----------------------------------------------------
+
+        if (
+            host == "damai.cn"
+            or host.endswith(
+                ".damai.cn"
+            )
+        ):
+            return "大麦"
+
+        # ----------------------------------------------------
+        # 票星球
+        #
+        # 如果域名中已经存在 piaoxingqiu，
+        # 可直接认定。
+        #
+        # 否则必须：
+        #   页面正文出现“票星球”
+        #   +
+        #   至少出现一个实际票务交易词
+        # ----------------------------------------------------
+
+        if "piaoxingqiu" in host:
+            return "票星球"
+
+        if "票星球" in text:
+            if any(
+                word.lower() in text
+                for word
+                in self.PAGE_TICKET_WORDS
+            ):
+                return "票星球"
+
+        # ----------------------------------------------------
+        # 猫眼
+        # ----------------------------------------------------
+
+        if (
+            host == "maoyan.com"
+            or host.endswith(
+                ".maoyan.com"
+            )
+        ):
+            return "猫眼"
+
+        if "猫眼演出" in text:
+            if any(
+                word.lower() in text
+                for word
+                in self.PAGE_TICKET_WORDS
+            ):
+                return "猫眼"
+
+        # ----------------------------------------------------
+        # 看个比赛
+        # ----------------------------------------------------
+
+        if "kangebisai" in host:
+            return "看个比赛"
+
+        if "看个比赛" in text:
+            if any(
+                word.lower() in text
+                for word
+                in self.PAGE_TICKET_WORDS
+            ):
+                return "看个比赛"
+
+        return None
+
+    # ========================================================
+    # JSON 字段解析
+    # ========================================================
+
     @staticmethod
     def _json_string(
         content: str,
         key: str,
     ) -> Optional[str]:
+        """提取 JSON 字符串字段"""
+
         pattern = (
             rf'"{re.escape(key)}"'
             r'\s*:\s*'
@@ -536,6 +843,8 @@ class RSSFetcher:
         content: str,
         key: str,
     ) -> Optional[str]:
+        """提取 JSON 数字字段"""
+
         match = re.search(
             (
                 rf'"{re.escape(key)}"'
@@ -555,6 +864,8 @@ class RSSFetcher:
         content: str,
         key: str,
     ) -> Optional[bool]:
+        """提取 JSON bool 字段"""
+
         match = re.search(
             (
                 rf'"{re.escape(key)}"'
@@ -573,14 +884,16 @@ class RSSFetcher:
             == "true"
         )
 
+    # ========================================================
+    # 大麦字段解析
+    # ========================================================
+
     def _extract_damai_evidence(
         self,
         content: str,
         visible_text: str,
     ) -> str:
-        """
-        从真实大麦项目详情页提取字段
-        """
+        """提取大麦项目详情字段"""
 
         parts: List[str] = []
 
@@ -637,6 +950,10 @@ class RSSFetcher:
             ),
         )
 
+        # ----------------------------------------------------
+        # 字符串字段
+        # ----------------------------------------------------
+
         for label, keys in field_map:
             value = None
 
@@ -656,6 +973,10 @@ class RSSFetcher:
                     f"{label}={value}"
                 )
 
+        # ----------------------------------------------------
+        # 限购
+        # ----------------------------------------------------
+
         single_limit = (
             self._json_number(
                 content,
@@ -665,9 +986,12 @@ class RSSFetcher:
 
         if single_limit:
             parts.append(
-                f"单场限购="
-                f"{single_limit}张"
+                f"单场限购={single_limit}张"
             )
+
+        # ----------------------------------------------------
+        # 实名
+        # ----------------------------------------------------
 
         real_name = (
             self._json_bool(
@@ -678,18 +1002,18 @@ class RSSFetcher:
 
         if real_name is not None:
             if real_name:
-                value = (
-                    "需要实名/实人认证"
-                )
-            else:
-                value = (
-                    "页面结构字段显示"
-                    "无需实名认证"
+                parts.append(
+                    "实名要求=需要实名/实人认证"
                 )
 
-            parts.append(
-                f"实名要求={value}"
-            )
+            else:
+                parts.append(
+                    "实名要求=页面结构字段显示无需实名认证"
+                )
+
+        # ----------------------------------------------------
+        # 退票规则
+        # ----------------------------------------------------
 
         refund_label = None
 
@@ -726,6 +1050,11 @@ class RSSFetcher:
                 f"退改={refund_label}"
             )
 
+        # ----------------------------------------------------
+        # 如果 JSON 没有 singleLimit，
+        # 尝试正文提取
+        # ----------------------------------------------------
+
         if not single_limit:
             limit_match = re.search(
                 (
@@ -746,18 +1075,59 @@ class RSSFetcher:
 
         return "；".join(parts)
 
+    # ========================================================
+    # 真实票务页面抓取
+    # ========================================================
+
     def _fetch_ticket_page(
         self,
         source_url: str,
     ) -> Optional[str]:
         """
-        跟随短链 / 外链，
-        抓真实票务项目页面
+        跟随外链抓真实票务项目页面。
+
+        只有真正识别到：
+            大麦
+            票星球
+            猫眼
+            看个比赛
+
+        才返回证据。
+
+        以下全部忽略：
+            微博页
+            微博 Visitor 页面
+            微博搜索页
+            图片 CDN
+            微信普通文章
+            普通新闻网页
         """
+
+        if not source_url:
+            return None
+
+        # ----------------------------------------------------
+        # 请求前过滤
+        # ----------------------------------------------------
+
+        if self._is_static_asset_url(
+            source_url
+        ):
+            return None
+
+        if self._is_weibo_or_sina_url(
+            source_url
+        ):
+            return None
+
+        # ----------------------------------------------------
+        # 请求
+        # ----------------------------------------------------
 
         try:
             response = self.session.get(
                 source_url,
+
                 timeout=(
                     10,
                     min(
@@ -768,6 +1138,7 @@ class RSSFetcher:
                         45,
                     ),
                 ),
+
                 allow_redirects=True,
             )
 
@@ -783,10 +1154,28 @@ class RSSFetcher:
 
         final_url = response.url
 
-        if self._should_skip_final_url(
+        # ----------------------------------------------------
+        # 重定向后的最终地址再次检查
+        # ----------------------------------------------------
+
+        if self._is_static_asset_url(
             final_url
         ):
             return None
+
+        if self._is_weibo_or_sina_url(
+            final_url
+        ):
+            print(
+                "[票务页] 忽略微博/新浪内部页: "
+                f"{final_url}"
+            )
+
+            return None
+
+        # ----------------------------------------------------
+        # Content-Type
+        # ----------------------------------------------------
 
         content_type = (
             response.headers.get(
@@ -809,7 +1198,10 @@ class RSSFetcher:
         ):
             return None
 
-        # 防止异常大页面占用过多内存
+        # ----------------------------------------------------
+        # 页面正文
+        # ----------------------------------------------------
+
         raw_content = (
             response.text[
                 :2_000_000
@@ -819,46 +1211,43 @@ class RSSFetcher:
         visible_text = (
             self._extract_visible_text(
                 raw_content,
-                limit=5000,
+                limit=6000,
             )
         )
 
-        host = (
-            urlparse(
-                final_url
-            ).hostname
-            or ""
-        ).lower()
+        # ----------------------------------------------------
+        # 必须是真正票务平台
+        # ----------------------------------------------------
 
         platform = (
-            "公开票务项目页"
+            self._detect_ticket_platform(
+                final_url,
+                visible_text,
+            )
         )
 
-        if "damai" in host:
-            platform = "大麦"
-
-        elif "maoyan" in host:
-            platform = "猫眼"
-
-        elif (
-            "piaoxingqiu"
-            in host
-            or "票星球"
-            in visible_text[:500]
-        ):
-            platform = "票星球"
-
-        elif (
-            "看个比赛"
-            in visible_text[:500]
-        ):
-            platform = (
-                "看个比赛"
+        if not platform:
+            print(
+                "[票务页] 非票务平台页面，忽略: "
+                f"{final_url}"
             )
 
-        structured = ""
+            return None
 
-        if "damai" in host:
+        # ----------------------------------------------------
+        # 构造证据
+        # ----------------------------------------------------
+
+        evidence_parts = [
+            f"平台={platform}",
+            f"最终项目链接={final_url}",
+        ]
+
+        # ----------------------------------------------------
+        # 大麦结构化字段
+        # ----------------------------------------------------
+
+        if platform == "大麦":
             structured = (
                 self._extract_damai_evidence(
                     raw_content,
@@ -866,15 +1255,14 @@ class RSSFetcher:
                 )
             )
 
-        evidence_parts = [
-            f"平台={platform}",
-            f"最终项目链接={final_url}",
-        ]
+            if structured:
+                evidence_parts.append(
+                    structured
+                )
 
-        if structured:
-            evidence_parts.append(
-                structured
-            )
+        # ----------------------------------------------------
+        # 保留部分正文
+        # ----------------------------------------------------
 
         if visible_text:
             evidence_parts.append(
@@ -882,22 +1270,18 @@ class RSSFetcher:
                 + visible_text[:3500]
             )
 
-        else:
-            evidence_parts.append(
-                "页面正文不足；"
-                "该页面可能依赖 "
-                "JavaScript、App "
-                "或登录态渲染"
-            )
-
         print(
-            "[票务页] 抓取成功: "
+            "[票务页] 真正票务页面抓取成功: "
             f"{platform} -> {final_url}"
         )
 
         return "；".join(
             evidence_parts
         )
+
+    # ========================================================
+    # Ticket enrich
+    # ========================================================
 
     def _enrich_ticket_summary(
         self,
@@ -907,27 +1291,27 @@ class RSSFetcher:
         raw_summary: str = "",
     ) -> str:
         """
-        票务内容增强。
+        对篮球票务条目进行项目页增强。
 
         summary:
-            TrendRadar 已清洗的纯文本摘要，
-            用于判断是否属于票务内容。
+            parser 清洗后的纯文本。
 
         raw_summary:
-            RSS 原始 HTML description，
-            用于寻找 href / t.cn / 项目页链接。
-
-        返回值：
-            始终保持纯文本 summary 为主体，
-            只有抓到真实票务项目页时才追加证据。
+            parser 保留的原始 HTML。
+            用于获取 href。
         """
+
+        # ----------------------------------------------------
+        # 当前 Feed 不需要票务增强
+        # ----------------------------------------------------
 
         if not feed.ticket_enrich:
             return summary
 
-        # ------------------------------------------------------
-        # Step 1：判断是不是需要票务增强的内容
-        # ------------------------------------------------------
+        # ----------------------------------------------------
+        # 不是篮球票务
+        # ----------------------------------------------------
+
         if not self._is_ticket_context(
             feed,
             title,
@@ -937,16 +1321,14 @@ class RSSFetcher:
 
         print(
             f"[票务检测] {feed.name}: "
-            f"命中票务内容 -> "
+            f"命中篮球票务内容 -> "
             f"{title[:80]}"
         )
 
-        # ------------------------------------------------------
-        # Step 2：
-        # 必须从 raw_summary 提取链接。
-        #
-        # parsed.summary 中 HTML 已经被 RSSParser 删除。
-        # ------------------------------------------------------
+        # ----------------------------------------------------
+        # 必须从 raw_summary 提取链接
+        # ----------------------------------------------------
+
         link_source = (
             raw_summary
             or summary
@@ -954,11 +1336,6 @@ class RSSFetcher:
 
         links = self._extract_links(
             link_source
-        )
-
-        print(
-            f"[票务检测] {feed.name}: "
-            f"发现 {len(links)} 个原始链接"
         )
 
         if not links:
@@ -969,14 +1346,63 @@ class RSSFetcher:
 
             return summary
 
+        # ----------------------------------------------------
+        # 去除：
+        #   微博页
+        #   新浪页
+        #   图片
+        #   视频
+        #   JS/CSS
+        # ----------------------------------------------------
+
+        candidate_links: List[str] = []
+
+        for link in links:
+            if self._is_static_asset_url(
+                link
+            ):
+                continue
+
+            if self._is_weibo_or_sina_url(
+                link
+            ):
+                continue
+
+            candidate_links.append(
+                link
+            )
+
+        print(
+            f"[票务检测] {feed.name}: "
+            f"{len(links)} 个原始链接，"
+            f"{len(candidate_links)} 个可用外链候选"
+        )
+
+        # ----------------------------------------------------
+        # 没有真实外链
+        # ----------------------------------------------------
+
+        if not candidate_links:
+            print(
+                f"[票务检测] {feed.name}: "
+                "只有微博内部页/图片等链接，"
+                "没有真实购票项目外链"
+            )
+
+            return summary
+
         evidence: List[str] = []
 
-        # 最多尝试 8 个 URL，
-        # 最多保存 2 个真正有效的项目页。
-        for link in links[:8]:
+        # ----------------------------------------------------
+        # 最多尝试 6 个外链
+        # 最多保存 2 个真实项目页
+        # ----------------------------------------------------
+
+        for link in candidate_links[:6]:
+
             print(
                 "[票务检测] "
-                f"尝试外链 -> {link}"
+                f"尝试票务外链 -> {link}"
             )
 
             item = (
@@ -988,20 +1414,27 @@ class RSSFetcher:
             if not item:
                 continue
 
-            evidence.append(
-                item
-            )
+            evidence.append(item)
 
             if len(evidence) >= 2:
                 break
 
+        # ----------------------------------------------------
+        # 有外链，但没有真正票务项目页
+        # ----------------------------------------------------
+
         if not evidence:
             print(
                 f"[票务检测] {feed.name}: "
-                "发现链接，但没有获得可读取的真实票务项目页"
+                "发现候选外链，"
+                "但没有获得真正票务平台项目页"
             )
 
             return summary
+
+        # ----------------------------------------------------
+        # 拼接真实票务证据
+        # ----------------------------------------------------
 
         appendix = "\n\n".join(
             (
@@ -1020,7 +1453,7 @@ class RSSFetcher:
             f"[票务检测] {feed.name}: "
             f"成功补充 "
             f"{len(evidence)} "
-            "个真实项目页"
+            "个真正票务项目页"
         )
 
         return (
@@ -1030,6 +1463,11 @@ class RSSFetcher:
             "==========\n"
             f"{appendix}"
         )
+
+    # ========================================================
+    # 单个 RSS Feed
+    # ========================================================
+
     def fetch_feed(
         self,
         feed: RSSFeedConfig,
@@ -1045,19 +1483,22 @@ class RSSFetcher:
             response = (
                 self.session.get(
                     request_url,
+
                     timeout=(
                         10,
                         self.timeout,
                     ),
+
                     allow_redirects=True,
                 )
             )
 
-            # 如果有人仍然误填 rsshub.app，
-            # 自动切换到已经验证可用的 worker。
+            # ------------------------------------------------
+            # rsshub.app 403 fallback
+            # ------------------------------------------------
+
             if (
-                response.status_code
-                == 403
+                response.status_code == 403
                 and request_url.startswith(
                     self.RSSHUB_FALLBACK_FROM
                 )
@@ -1080,15 +1521,21 @@ class RSSFetcher:
                 response = (
                     self.session.get(
                         fallback_url,
+
                         timeout=(
                             10,
                             self.timeout,
                         ),
+
                         allow_redirects=True,
                     )
                 )
 
             response.raise_for_status()
+
+            # ------------------------------------------------
+            # Feed 内容
+            # ------------------------------------------------
 
             content_type = (
                 response.headers.get(
@@ -1122,15 +1569,15 @@ class RSSFetcher:
                 raise ValueError(
                     "返回内容不是 "
                     "RSS/Atom/JSON Feed；"
-                    f"status="
-                    f"{response.status_code}, "
-                    f"content_type="
-                    f"{content_type}, "
-                    f"final_url="
-                    f"{response.url}, "
-                    f"preview="
-                    f"{content[:200]!r}"
+                    f"status={response.status_code}, "
+                    f"content_type={content_type}, "
+                    f"final_url={response.url}, "
+                    f"preview={content[:200]!r}"
                 )
+
+            # ------------------------------------------------
+            # Parser
+            # ------------------------------------------------
 
             parsed_items = (
                 self.parser.parse(
@@ -1139,12 +1586,20 @@ class RSSFetcher:
                 )
             )
 
+            # ------------------------------------------------
+            # max_items
+            # ------------------------------------------------
+
             if feed.max_items > 0:
                 parsed_items = (
                     parsed_items[
                         :feed.max_items
                     ]
                 )
+
+            # ------------------------------------------------
+            # 时间
+            # ------------------------------------------------
 
             now = get_configured_time(
                 self.timezone
@@ -1160,30 +1615,42 @@ class RSSFetcher:
 
             author_filtered = 0
 
+            # ------------------------------------------------
+            # 条目处理
+            # ------------------------------------------------
+
             for parsed in parsed_items:
 
-                # 对山东/山西/宁波
-                # 只允许官方作者
+                # ============================================
+                # 官方作者过滤
+                # ============================================
+
                 if not self._author_allowed(
                     feed,
                     parsed.author or "",
                 ):
                     author_filtered += 1
+
+                    print(
+                        f"[RSS作者过滤] {feed.name}: "
+                        f"拒绝 author="
+                        f"{parsed.author!r}, "
+                        f"title="
+                        f"{(parsed.title or '')[:60]!r}"
+                    )
+
                     continue
 
-                                # ----------------------------------------------------------
-                # 正常 summary：
-                #   已清洗纯文本，用于 TrendRadar 输出
-                #
-                # raw_summary：
-                #   parser 保留下来的 RSS 原始 HTML，
-                #   用于票务 href 提取
-                # ----------------------------------------------------------
+                # ============================================
+                # summary
+                # ============================================
+
                 clean_summary = (
                     parsed.summary
                     or ""
                 )
 
+                # parser.py 中新增的 raw_summary
                 raw_summary = (
                     getattr(
                         parsed,
@@ -1193,45 +1660,68 @@ class RSSFetcher:
                     or clean_summary
                 )
 
+                # ============================================
+                # 真实票务项目页增强
+                # ============================================
+
                 enriched_summary = (
                     self._enrich_ticket_summary(
                         feed=feed,
+
                         title=(
                             parsed.title
                             or ""
                         ),
+
                         summary=clean_summary,
+
                         raw_summary=raw_summary,
                     )
                 )
 
+                # ============================================
+                # RSSItem
+                # ============================================
+
                 item = RSSItem(
                     title=parsed.title,
+
                     feed_id=feed.id,
                     feed_name=feed.name,
+
                     url=parsed.url,
+
                     guid=(
                         parsed.guid
                         or ""
                     ),
+
                     published_at=(
                         parsed.published_at
                         or ""
                     ),
+
                     summary=(
                         enriched_summary
                     ),
+
                     author=(
                         parsed.author
                         or ""
                     ),
+
                     crawl_time=crawl_time,
                     first_time=crawl_time,
                     last_time=crawl_time,
+
                     count=1,
                 )
 
                 items.append(item)
+
+            # ------------------------------------------------
+            # 作者过滤统计
+            # ------------------------------------------------
 
             extra = ""
 
@@ -1242,6 +1732,10 @@ class RSSFetcher:
                     f", 丢弃 "
                     f"{author_filtered} 条"
                 )
+
+            # ------------------------------------------------
+            # 完成日志
+            # ------------------------------------------------
 
             print(
                 f"[RSS] {feed.name}: "
@@ -1257,6 +1751,10 @@ class RSSFetcher:
                 items,
                 None,
             )
+
+        # ====================================================
+        # Timeout
+        # ====================================================
 
         except requests.Timeout:
             error = (
@@ -1275,6 +1773,10 @@ class RSSFetcher:
                 error,
             )
 
+        # ====================================================
+        # HTTP
+        # ====================================================
+
         except requests.RequestException as exc:
             error = (
                 f"请求失败: {exc}"
@@ -1291,6 +1793,10 @@ class RSSFetcher:
                 error,
             )
 
+        # ====================================================
+        # Parser
+        # ====================================================
+
         except ValueError as exc:
             error = (
                 f"解析失败: {exc}"
@@ -1306,6 +1812,10 @@ class RSSFetcher:
                 [],
                 error,
             )
+
+        # ====================================================
+        # Unknown
+        # ====================================================
 
         except Exception as exc:
             error = (
@@ -1325,10 +1835,14 @@ class RSSFetcher:
                 error,
             )
 
+    # ========================================================
+    # 所有 RSS Feed
+    # ========================================================
+
     def fetch_all(
         self,
     ) -> RSSData:
-        """抓取所有 RSS 源"""
+        """抓取全部 RSS 源"""
 
         all_items: Dict[
             str,
@@ -1346,12 +1860,16 @@ class RSSFetcher:
             self.timezone
         )
 
-        crawl_time = now.strftime(
-            "%H:%M"
+        crawl_time = (
+            now.strftime(
+                "%H:%M"
+            )
         )
 
-        crawl_date = now.strftime(
-            "%Y-%m-%d"
+        crawl_date = (
+            now.strftime(
+                "%Y-%m-%d"
+            )
         )
 
         print(
@@ -1360,10 +1878,19 @@ class RSSFetcher:
             "个 RSS 源..."
         )
 
-        for i, feed in enumerate(
+        # ----------------------------------------------------
+        # Feed 循环
+        # ----------------------------------------------------
+
+        for index, feed in enumerate(
             self.feeds
         ):
-            if i > 0:
+
+            # ------------------------------------------------
+            # 请求间隔
+            # ------------------------------------------------
+
+            if index > 0:
                 interval = (
                     self.request_interval
                     / 1000
@@ -1384,6 +1911,10 @@ class RSSFetcher:
                     )
                 )
 
+            # ------------------------------------------------
+            # 抓取
+            # ------------------------------------------------
+
             items, error = (
                 self.fetch_feed(
                     feed
@@ -1403,6 +1934,10 @@ class RSSFetcher:
                 all_items[
                     feed.id
                 ] = items
+
+        # ----------------------------------------------------
+        # 统计
+        # ----------------------------------------------------
 
         total_items = sum(
             len(items)
@@ -1427,6 +1962,10 @@ class RSSFetcher:
                 )
             )
 
+        # ----------------------------------------------------
+        # 返回
+        # ----------------------------------------------------
+
         return RSSData(
             date=crawl_date,
             crawl_time=crawl_time,
@@ -1435,12 +1974,26 @@ class RSSFetcher:
             failed_ids=failed_ids,
         )
 
+    # ========================================================
+    # from_config
+    # ========================================================
+
     @classmethod
     def from_config(
         cls,
         config: Dict,
     ) -> "RSSFetcher":
-        """从配置字典创建抓取器"""
+        """
+        从配置字典创建抓取器。
+
+        虽然当前 TrendRadar 主程序在 __main__.py
+        中也会手动创建 RSSFeedConfig，
+        这里仍保留完整兼容实现。
+        """
+
+        # ----------------------------------------------------
+        # freshness
+        # ----------------------------------------------------
 
         freshness_config = (
             config.get(
@@ -1467,10 +2020,19 @@ class RSSFetcher:
             RSSFeedConfig
         ] = []
 
+        # ----------------------------------------------------
+        # feeds
+        # ----------------------------------------------------
+
         for feed_config in config.get(
             "feeds",
             [],
         ):
+
+            # =================================================
+            # max_age_days
+            # =================================================
+
             max_age_days_raw = (
                 feed_config.get(
                     "max_age_days"
@@ -1501,8 +2063,7 @@ class RSSFetcher:
                             f"RSS feed "
                             f"'{feed_id}' "
                             "的 max_age_days "
-                            "为负数，将使用"
-                            "全局默认值"
+                            "为负数，将使用全局默认值"
                         )
 
                         max_age_days = None
@@ -1529,6 +2090,10 @@ class RSSFetcher:
 
                     max_age_days = None
 
+            # =================================================
+            # allowed_authors
+            # =================================================
+
             allowed_authors_raw = (
                 feed_config.get(
                     "allowed_authors",
@@ -1541,7 +2106,7 @@ class RSSFetcher:
                 str,
             ):
                 allowed_authors = [
-                    allowed_authors_raw
+                    allowed_authors_raw.strip()
                 ]
 
             elif isinstance(
@@ -1549,49 +2114,95 @@ class RSSFetcher:
                 list,
             ):
                 allowed_authors = [
-                    str(
-                        author
-                    ).strip()
+                    str(author).strip()
                     for author
                     in allowed_authors_raw
-                    if str(
-                        author
-                    ).strip()
+                    if str(author).strip()
                 ]
 
             else:
                 allowed_authors = []
+
+            # =================================================
+            # ticket_enrich
+            # =================================================
+
+            ticket_enrich_raw = (
+                feed_config.get(
+                    "ticket_enrich",
+                    False,
+                )
+            )
+
+            if isinstance(
+                ticket_enrich_raw,
+                bool,
+            ):
+                ticket_enrich = (
+                    ticket_enrich_raw
+                )
+
+            elif isinstance(
+                ticket_enrich_raw,
+                str,
+            ):
+                ticket_enrich = (
+                    ticket_enrich_raw
+                    .strip()
+                    .lower()
+                    in {
+                        "1",
+                        "true",
+                        "yes",
+                        "on",
+                    }
+                )
+
+            else:
+                ticket_enrich = bool(
+                    ticket_enrich_raw
+                )
+
+            # =================================================
+            # RSSFeedConfig
+            # =================================================
 
             feed = RSSFeedConfig(
                 id=feed_config.get(
                     "id",
                     "",
                 ),
+
                 name=feed_config.get(
                     "name",
                     "",
                 ),
+
                 url=feed_config.get(
                     "url",
                     "",
                 ),
+
                 max_items=feed_config.get(
                     "max_items",
                     0,
                 ),
+
                 enabled=feed_config.get(
                     "enabled",
                     True,
                 ),
-                max_age_days=max_age_days,
+
+                max_age_days=(
+                    max_age_days
+                ),
+
                 allowed_authors=(
                     allowed_authors
                 ),
-                ticket_enrich=bool(
-                    feed_config.get(
-                        "ticket_enrich",
-                        False,
-                    )
+
+                ticket_enrich=(
+                    ticket_enrich
                 ),
             )
 
@@ -1601,31 +2212,42 @@ class RSSFetcher:
             ):
                 feeds.append(feed)
 
+        # ----------------------------------------------------
+        # 创建 RSSFetcher
+        # ----------------------------------------------------
+
         return cls(
             feeds=feeds,
+
             request_interval=config.get(
                 "request_interval",
                 2000,
             ),
+
             timeout=config.get(
                 "timeout",
                 15,
             ),
+
             use_proxy=config.get(
                 "use_proxy",
                 False,
             ),
+
             proxy_url=config.get(
                 "proxy_url",
                 "",
             ),
+
             timezone=config.get(
                 "timezone",
                 DEFAULT_TIMEZONE,
             ),
+
             freshness_enabled=(
                 freshness_enabled
             ),
+
             default_max_age_days=(
                 default_max_age_days
             ),
