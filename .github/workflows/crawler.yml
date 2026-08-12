@@ -35,7 +35,8 @@ on:
     #   "15 * * * *"     → 每小时第15分钟 / minute 15 every hour
     #   "30 0-14 * * *"  → 北京时间 8:00-22:00 每小时第30分钟 / Beijing 8am-10pm
     #
-    - cron: cron: "0 8,20 * * *"
+    - cron: "0 8,20 * * *"
+      timezone: "Asia/Shanghai"
 
   workflow_dispatch:
 
