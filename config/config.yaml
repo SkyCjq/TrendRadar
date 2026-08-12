@@ -285,26 +285,31 @@ rss:
       name: "大麦｜篮球"
       url: "https://rsshub.rss3.workers.dev/damai/activity/全部/全部/全部/篮球"
       max_age_days: 7
+      enabled: false
 
     - id: "damai-cba"
       name: "大麦｜CBA"
       url: "https://rsshub.rss3.workers.dev/damai/activity/全部/全部/全部/CBA"
       max_age_days: 7
+      enabled: false
 
     - id: "damai-china-men"
       name: "大麦｜中国男篮"
       url: "https://rsshub.rss3.workers.dev/damai/activity/全部/全部/全部/中国男篮"
       max_age_days: 7
+      enabled: false
 
     - id: "damai-wcba"
       name: "大麦｜WCBA"
       url: "https://rsshub.rss3.workers.dev/damai/activity/全部/全部/全部/WCBA"
       max_age_days: 7
+      enabled: false
 
     - id: "damai-nbl"
       name: "大麦｜NBL"
       url: "https://rsshub.rss3.workers.dev/damai/activity/全部/全部/全部/NBL"
       max_age_days: 7
+      enabled: false
 
 
     # ==========================================================
