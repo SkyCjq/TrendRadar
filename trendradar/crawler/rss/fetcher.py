@@ -68,21 +68,69 @@ class RSSFetcher:
         self.session = self._create_session()
 
     def _create_session(self) -> requests.Session:
-        """创建请求会话"""
-        session = requests.Session()
-        session.headers.update({
-            "User-Agent": "TrendRadar/2.0 RSS Reader (https://github.com/trendradar)",
-            "Accept": "application/feed+json, application/json, application/rss+xml, application/atom+xml, application/xml, text/xml, */*",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        })
+    """创建请求会话"""
 
-        if self.use_proxy and self.proxy_url:
-            session.proxies = {
-                "http": self.proxy_url,
-                "https": self.proxy_url,
-            }
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
 
-        return session
+    session = requests.Session()
+
+    # 使用常规浏览器 UA。
+    # 一些 RSS 代理、CDN、Cloudflare/WAF 会对非常规 UA
+    # 与浏览器 UA 返回不同结果。
+    session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": (
+            "application/rss+xml, "
+            "application/atom+xml, "
+            "application/xml;q=0.9, "
+            "text/xml;q=0.9, "
+            "*/*;q=0.8"
+        ),
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    })
+
+    # RSSHub 等公共实例偶发 429 / 5xx。
+    # 自动重试并采用指数退避。
+    retry = Retry(
+        total=4,
+        connect=4,
+        read=4,
+        status=4,
+        backoff_factor=2,
+        status_forcelist=[
+            429,
+            500,
+            502,
+            503,
+            504,
+        ],
+        allowed_methods=["GET"],
+        respect_retry_after_header=True,
+    )
+
+    adapter = HTTPAdapter(
+        max_retries=retry,
+        pool_connections=10,
+        pool_maxsize=10,
+    )
+
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+
+    if self.use_proxy and self.proxy_url:
+        session.proxies = {
+            "http": self.proxy_url,
+            "https": self.proxy_url,
+        }
+
+    return session
 
     def fetch_feed(self, feed: RSSFeedConfig) -> Tuple[List[RSSItem], Optional[str]]:
         """
@@ -95,10 +143,40 @@ class RSSFetcher:
             (条目列表, 错误信息) 元组
         """
         try:
-            response = self.session.get(feed.url, timeout=self.timeout)
-            response.raise_for_status()
+response = self.session.get(
+    feed.url,
+    timeout=(10, self.timeout),
+    allow_redirects=True,
+)
 
-            parsed_items = self.parser.parse(response.text, feed.url)
+response.raise_for_status()
+
+content_type = (
+    response.headers.get("Content-Type", "")
+    .lower()
+)
+
+content = response.text
+
+stripped = content.lstrip().lower()
+
+looks_like_feed = (
+    stripped.startswith("<?xml")
+    or stripped.startswith("<rss")
+    or stripped.startswith("<feed")
+    or stripped.startswith("{")
+)
+
+if not looks_like_feed:
+    raise ValueError(
+        "返回内容不是 RSS/Atom/JSON Feed；"
+        f"status={response.status_code}, "
+        f"content_type={content_type}, "
+        f"final_url={response.url}, "
+        f"preview={content[:200]!r}"
+    )
+
+parsed_items = self.parser.parse(content, feed.url)
 
             # 限制条目数量（0=不限制）
             if feed.max_items > 0:
