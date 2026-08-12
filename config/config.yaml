@@ -376,7 +376,7 @@ report:
 # 失败兜底：frequency_words.txt
 # ===============================================================
 filter:
-  method: "ai"
+  method: "keyword"
   priority_sort_enabled: true
 
 # ===============================================================
