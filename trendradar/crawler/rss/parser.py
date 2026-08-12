@@ -164,16 +164,73 @@ class RSSParser:
             published_at = self._parse_iso_date(date_str)
 
         # 摘要：优先 summary，否则使用 content_text
-        summary = item_data.get("summary", "")
+        # ------------------------------------------------------
+        # 原始内容，用于 ticket_enrich
+        # ------------------------------------------------------
+        raw_summary = (
+            item_data.get(
+                "content_html",
+                "",
+            )
+            or item_data.get(
+                "summary",
+                "",
+            )
+            or item_data.get(
+                "content_text",
+                "",
+            )
+        )
+
+        # ------------------------------------------------------
+        # TrendRadar 正常使用的纯文本摘要
+        # ------------------------------------------------------
+        summary = (
+            item_data.get(
+                "summary",
+                "",
+            )
+        )
+
         if not summary:
-            content_text = item_data.get("content_text", "")
-            content_html = item_data.get("content_html", "")
-            summary = content_text or self._clean_text(content_html)
+            content_text = (
+                item_data.get(
+                    "content_text",
+                    "",
+                )
+            )
+
+            content_html = (
+                item_data.get(
+                    "content_html",
+                    "",
+                )
+            )
+
+            summary = (
+                content_text
+                or self._clean_text(
+                    content_html
+                )
+            )
 
         if summary:
-            summary = self._clean_text(summary)
-            if len(summary) > self.max_summary_length:
-                summary = summary[:self.max_summary_length] + "..."
+            summary = (
+                self._clean_text(
+                    summary
+                )
+            )
+
+            if (
+                len(summary)
+                > self.max_summary_length
+            ):
+                summary = (
+                    summary[
+                        :self.max_summary_length
+                    ]
+                    + "..."
+                )
 
         # 作者
         author = None
@@ -193,6 +250,11 @@ class RSSParser:
             summary=summary or None,
             author=author,
             guid=guid,
+            raw_summary=(
+                str(raw_summary)[:20000]
+                if raw_summary
+                else None
+            ),
         )
 
     def _parse_iso_date(self, date_str: str) -> Optional[str]:
@@ -456,24 +518,41 @@ class RSSParser:
         # 足够覆盖微博 description 和购票外链。
         return raw_summary[:20000]
         
-    def _parse_summary(self, entry: Any) -> Optional[str]:
-        """解析摘要"""
-        summary = entry.get("summary") or entry.get("description", "")
+    def _parse_summary(
+        self,
+        entry: Any,
+    ) -> Optional[str]:
+        """
+        解析用于 TrendRadar 展示/分析的纯文本摘要。
 
-        if not summary:
-            # 尝试从 content 获取
-            content = entry.get("content", [])
-            if content and isinstance(content, list):
-                summary = content[0].get("value", "")
+        注意：
+        raw HTML 由 _get_raw_summary() 单独保存，
+        这里继续维持 TrendRadar 原来的纯文本行为。
+        """
 
-        if not summary:
+        raw_summary = (
+            self._get_raw_summary(
+                entry
+            )
+        )
+
+        if not raw_summary:
             return None
 
-        summary = self._clean_text(summary)
+        summary = self._clean_text(
+            raw_summary
+        )
 
-        # 截断过长的摘要
-        if len(summary) > self.max_summary_length:
-            summary = summary[:self.max_summary_length] + "..."
+        if (
+            len(summary)
+            > self.max_summary_length
+        ):
+            summary = (
+                summary[
+                    :self.max_summary_length
+                ]
+                + "..."
+            )
 
         return summary
 
