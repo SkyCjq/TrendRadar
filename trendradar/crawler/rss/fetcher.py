@@ -135,6 +135,9 @@ class RSSFetcher:
 
     BASKETBALL_WORDS = (
         "篮球",
+        "辽篮",
+        "篮坛",
+        "篮球队",
         "cba",
         "wcba",
         "nbl",
@@ -434,8 +437,9 @@ class RSSFetcher:
         if not self._is_weibo_keyword_feed(feed):
             return False, None
 
-        if (published_at or "").strip():
-            return False, None
+        # keyword RSS 的 published_at 可能缺失，也可能并不可靠地代表微博原始发布时间。
+        # 因此只要正文里存在明确日期，就优先用正文日期做“明显过旧”兜底；
+        # 如果正文没有明确日期，再交给 TrendRadar 原有 published_at freshness 逻辑。
 
         if feed.max_age_days is None:
             return False, None
@@ -505,11 +509,14 @@ class RSSFetcher:
 
         _ = feed
 
-        text = f"{title or ''} {summary or ''}"
-        text_lower = text.lower()
+        # 篮球属性只看标题/微博正文主体（RSSHub 的 title 通常就是整条微博正文）。
+        # 不使用 summary 做篮球判定，因为部分 keyword RSS 的 summary 可能夹带
+        # feed/query/关联文本，从而让演唱会、足球、网球等条目被“篮球”误命中。
+        title_lower = (title or "").lower()
+        ticket_text_lower = f"{title or ''} {summary or ''}".lower()
 
         has_basketball = any(
-            word.lower() in text_lower
+            word.lower() in title_lower
             for word in self.BASKETBALL_WORDS
         )
 
@@ -517,17 +524,17 @@ class RSSFetcher:
             return False
 
         has_strong_ticket = any(
-            word.lower() in text_lower
+            word.lower() in ticket_text_lower
             for word in self.TICKET_STRONG_WORDS
         )
 
         has_weak_ticket = any(
-            word.lower() in text_lower
+            word.lower() in ticket_text_lower
             for word in self.TICKET_WEAK_WORDS
         )
 
         has_transaction = any(
-            word.lower() in text_lower
+            word.lower() in ticket_text_lower
             for word in self.TICKET_TRANSACTION_WORDS
         )
 
@@ -1138,6 +1145,47 @@ class RSSFetcher:
                     continue
 
                 clean_summary = parsed.summary or ""
+
+                # ============================================
+                # 微博 keyword discovery 正文日期兜底
+                # ============================================
+
+                should_drop_old, explicit_date = (
+                    self._should_drop_old_keyword_discovery_item(
+                        feed=feed,
+                        title=parsed.title or "",
+                        summary=clean_summary,
+                        published_at=parsed.published_at or "",
+                    )
+                )
+
+                if should_drop_old:
+                    print(
+                        f"[微博日期过滤] {feed.name}: "
+                        f"正文最新明确日期={explicit_date}, "
+                        f"超过 max_age_days={feed.max_age_days}, "
+                        f"丢弃 -> {(parsed.title or '')[:80]}"
+                    )
+                    continue
+
+                # ============================================
+                # 票务专项 discovery：非篮球票务整条丢弃
+                # ============================================
+
+                if (
+                    self._is_strict_ticket_discovery_feed(feed)
+                    and not self._is_ticket_context(
+                        feed,
+                        parsed.title or "",
+                        clean_summary,
+                    )
+                ):
+                    print(
+                        f"[票务专项过滤] {feed.name}: "
+                        f"非篮球票务，整条丢弃 -> "
+                        f"{(parsed.title or '')[:80]}"
+                    )
+                    continue
 
                 raw_summary = (
                     getattr(
