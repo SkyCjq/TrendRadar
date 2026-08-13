@@ -27,6 +27,7 @@ import re
 import time
 
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from html.parser import HTMLParser
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
@@ -293,6 +294,201 @@ class RSSFetcher:
             result.append(url)
 
         return result
+
+
+    @staticmethod
+    def _is_weibo_keyword_feed(feed: RSSFeedConfig) -> bool:
+        """
+        只对 RSSHub 微博 keyword discovery 做严格正文日期兜底。
+
+        固定官方 UID（/weibo/user/<uid>）不走这套逻辑，
+        避免因为 RSSHub 缺少 pubDate 而误杀刚发布的官方微博。
+        """
+        url = (feed.url or "").lower()
+        return "/weibo/keyword/" in url
+
+    @staticmethod
+    def _extract_explicit_dates_from_text(
+        text: str,
+        now: datetime,
+    ) -> List[datetime]:
+        """
+        从微博标题/正文中提取明确日期。
+
+        支持：
+        - 2026年6月2日
+        - 6月2日
+        - 2026-06-02 / 2026/06/02
+        - 8.10 / 8.10号 / 8.10日
+
+        无年份日期默认使用当前年份；
+        如果解析结果比当前时间晚超过 180 天，则回退上一年，
+        用于处理年初抓到上一年年末旧帖的情况。
+        """
+        if not text:
+            return []
+
+        normalized = re.sub(r"\s+", "", text)
+        results: List[datetime] = []
+        seen = set()
+
+        def add_date(year: int, month: int, day: int):
+            try:
+                dt = now.replace(
+                    year=year,
+                    month=month,
+                    day=day,
+                    hour=0,
+                    minute=0,
+                    second=0,
+                    microsecond=0,
+                )
+            except ValueError:
+                return
+
+            # 无年份日期在跨年附近做简单回退。
+            if dt - now > timedelta(days=180):
+                try:
+                    dt = dt.replace(year=year - 1)
+                except ValueError:
+                    pass
+
+            key = dt.strftime("%Y-%m-%d")
+            if key not in seen:
+                seen.add(key)
+                results.append(dt)
+
+        # YYYY年M月D日
+        for m in re.finditer(
+            r"(?<!\d)(20\d{2})年(\d{1,2})月(\d{1,2})日?",
+            normalized,
+        ):
+            add_date(
+                int(m.group(1)),
+                int(m.group(2)),
+                int(m.group(3)),
+            )
+
+        # YYYY-MM-DD / YYYY/MM/DD
+        for m in re.finditer(
+            r"(?<!\d)(20\d{2})[-/](\d{1,2})[-/](\d{1,2})(?!\d)",
+            normalized,
+        ):
+            add_date(
+                int(m.group(1)),
+                int(m.group(2)),
+                int(m.group(3)),
+            )
+
+        # M月D日
+        for m in re.finditer(
+            r"(?<!\d)(\d{1,2})月(\d{1,2})日?",
+            normalized,
+        ):
+            # 避免重复吃到 YYYY年M月D日中的 M月D日。
+            prefix = normalized[max(0, m.start() - 6):m.start()]
+            if re.search(r"20\d{2}年$", prefix):
+                continue
+
+            add_date(
+                now.year,
+                int(m.group(1)),
+                int(m.group(2)),
+            )
+
+        # M.D / M.D号 / M.D日
+        # 只接受 1-12 月和 1-31 日，且前后不能继续是数字。
+        for m in re.finditer(
+            r"(?<!\d)(1[0-2]|0?[1-9])\.(3[01]|[12]\d|0?[1-9])(?:号|日)?(?!\d)",
+            normalized,
+        ):
+            add_date(
+                now.year,
+                int(m.group(1)),
+                int(m.group(2)),
+            )
+
+        return sorted(results)
+
+    def _should_drop_old_keyword_discovery_item(
+        self,
+        feed: RSSFeedConfig,
+        title: str,
+        summary: str,
+        published_at: str,
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        微博 keyword discovery 的日期兜底。
+
+        规则：
+        1. 非 /weibo/keyword/ 源：不处理。
+        2. published_at 有值：交给 TrendRadar 原有 freshness 逻辑。
+        3. published_at 为空：从标题+正文抽取明确日期。
+        4. 如果存在至少一个最近/未来日期：保留。
+        5. 如果所有明确日期都早于 max_age_days：丢弃。
+        6. 完全没有明确日期：保留，但后续只能视为“时间未核实线索”。
+
+        对票务 discovery 很重要：一条当前售票帖可能同时写旧赛果和未来场次；
+        只要文本里存在最近/未来明确日期，就不会因为另一个旧日期被误删。
+        """
+        if not self._is_weibo_keyword_feed(feed):
+            return False, None
+
+        if (published_at or "").strip():
+            return False, None
+
+        if feed.max_age_days is None:
+            return False, None
+
+        try:
+            max_age_days = int(feed.max_age_days)
+        except (TypeError, ValueError):
+            return False, None
+
+        if max_age_days < 0:
+            return False, None
+
+        now = get_configured_time(self.timezone)
+        dates = self._extract_explicit_dates_from_text(
+            f"{title or ''} {summary or ''}",
+            now,
+        )
+
+        if not dates:
+            return False, None
+
+        cutoff = (
+            now.replace(
+                hour=0,
+                minute=0,
+                second=0,
+                microsecond=0,
+            )
+            - timedelta(days=max_age_days)
+        )
+
+        # 只要有一个明确日期仍在窗口内或属于未来，就保留。
+        if any(dt >= cutoff for dt in dates):
+            return False, None
+
+        newest = max(dates)
+        return (
+            True,
+            newest.strftime("%Y-%m-%d"),
+        )
+
+
+    @staticmethod
+    def _is_strict_ticket_discovery_feed(
+        feed: RSSFeedConfig,
+    ) -> bool:
+        """
+        仅对“票务专项｜...”源启用整条 RSS 严格过滤。
+
+        这些源本质是 keyword discovery；若不是篮球票务，
+        不应进入 RSS 数据库和后续关键词分组。
+        """
+        return (feed.name or "").startswith("票务专项｜")
 
     def _is_ticket_context(
         self,
