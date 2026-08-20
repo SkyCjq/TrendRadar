@@ -440,6 +440,7 @@ class RemoteStorageBackend(SQLiteStorageMixin, StorageBackend):
                         FROM rss_items i
                         LEFT JOIN rss_feeds f
                             ON i.feed_id = f.id
+                        WHERE COALESCE(i.last_crawl_time, '') NOT IN ('', '00:00')
                     """
                 else:
                     sql = """
