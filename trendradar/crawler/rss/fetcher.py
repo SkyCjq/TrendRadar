@@ -441,6 +441,12 @@ class RSSFetcher:
         if not self._is_weibo_keyword_feed(feed):
             return False, None
 
+        # 已通过官方作者白名单确认的 keyword fallback 不使用正文日期兜底。
+        # 这类源的身份已经由 allowed_authors 精确确认；正文中可能包含
+        # 球员生日、履历日期、历史赛季日期等，不能把这些日期误当发布时间。
+        if feed.allowed_authors:
+            return False, None
+           
         # keyword RSS 的 published_at 可能缺失，也可能并不可靠地代表微博原始发布时间。
         # 因此只要正文里存在明确日期，就优先用正文日期做“明显过旧”兜底；
         # 如果正文没有明确日期，再交给 TrendRadar 原有 published_at freshness 逻辑。
