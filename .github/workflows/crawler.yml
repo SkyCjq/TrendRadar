@@ -158,7 +158,10 @@ jobs:
           GENERIC_WEBHOOK_TEMPLATE: ${{ secrets.GENERIC_WEBHOOK_TEMPLATE }}
           # AI 配置（ai_analysis 和 ai_translation 共享模型配置）
           AI_ANALYSIS_ENABLED: ${{ secrets.AI_ANALYSIS_ENABLED }}
+          # Gemini 主 Key
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          # Gemini 备用 Key
+          AI_API_KEY_FALLBACK: ${{ secrets.AI_API_KEY_FALLBACK }}
           AI_MODEL: ${{ secrets.AI_MODEL }}
           AI_API_BASE: ${{ secrets.AI_API_BASE }}
           # 远程存储配置
