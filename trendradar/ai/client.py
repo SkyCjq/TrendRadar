@@ -2,13 +2,19 @@
 """
 AI 客户端模块
 
-基于 LiteLLM 的统一 AI 模型接口
-支持 100+ AI 提供商（OpenAI、DeepSeek、Gemini、Claude、国内模型等）
+基于 LiteLLM 的统一 AI 模型接口。
+
+扩展：
+1. 主 API Key：AI_API_KEY
+2. 备用 API Key：AI_API_KEY_FALLBACK
+3. 主 Key 遇到限流、认证、超时或服务异常时，
+   自动使用备用 Key 重试同一个模型。
 """
 
 import os
 from typing import Any, Dict, List
 
+import litellm
 from litellm import completion
 
 
@@ -21,101 +27,314 @@ class AIClient:
 
         Args:
             config: AI 配置字典
-                - MODEL: 模型标识（格式: provider/model_name）
-                - API_KEY: API 密钥
-                - API_BASE: API 基础 URL（可选）
-                - TEMPERATURE: 采样温度
-                - MAX_TOKENS: 最大生成 token 数
-                - TIMEOUT: 请求超时时间（秒）
-                - NUM_RETRIES: 重试次数（可选）
-                - FALLBACK_MODELS: 备用模型列表（可选）
-        """
-        self.model = config.get("MODEL", "deepseek/deepseek-chat")
-        self.api_key = config.get("API_KEY") or os.environ.get("AI_API_KEY", "")
-        self.api_base = config.get("API_BASE", "")
-        self.temperature = config.get("TEMPERATURE", 1.0)
-        self.max_tokens = config.get("MAX_TOKENS", 5000)
-        self.timeout = config.get("TIMEOUT", 120)
-        self.num_retries = config.get("NUM_RETRIES", 2)
-        self.fallback_models = config.get("FALLBACK_MODELS", [])
+                - MODEL
+                - API_KEY
+                - API_BASE
+                - TEMPERATURE
+                - MAX_TOKENS
+                - TIMEOUT
+                - NUM_RETRIES
+                - FALLBACK_MODELS
 
-    def chat(
+        环境变量：
+            AI_API_KEY
+            AI_API_KEY_FALLBACK
+        """
+
+        self.model = config.get(
+            "MODEL",
+            "deepseek/deepseek-chat",
+        )
+
+        # 主 Key
+        self.api_key = (
+            config.get("API_KEY")
+            or os.environ.get("AI_API_KEY", "")
+        )
+
+        # 备用 Key
+        self.fallback_api_key = os.environ.get(
+            "AI_API_KEY_FALLBACK",
+            "",
+        )
+
+        self.api_base = config.get(
+            "API_BASE",
+            "",
+        )
+
+        self.temperature = config.get(
+            "TEMPERATURE",
+            1.0,
+        )
+
+        self.max_tokens = config.get(
+            "MAX_TOKENS",
+            5000,
+        )
+
+        self.timeout = config.get(
+            "TIMEOUT",
+            120,
+        )
+
+        self.num_retries = config.get(
+            "NUM_RETRIES",
+            2,
+        )
+
+        self.fallback_models = config.get(
+            "FALLBACK_MODELS",
+            [],
+        )
+
+    @staticmethod
+    def _should_switch_api_key(exc: Exception) -> bool:
+        """
+        判断当前异常是否适合切换备用 API Key。
+
+        典型场景：
+        - 401：Key 失效
+        - 403：权限/项目限制
+        - 408：请求超时
+        - 429：RPM/RPD/TPM 配额耗尽
+        - 5xx：Provider 临时服务异常
+
+        400 等请求参数错误不切 Key，
+        因为更换 Key 通常不能解决参数问题。
+        """
+
+        if isinstance(
+            exc,
+            (
+                litellm.RateLimitError,
+                litellm.AuthenticationError,
+                litellm.APIConnectionError,
+                litellm.Timeout,
+            ),
+        ):
+            return True
+
+        status_code = getattr(
+            exc,
+            "status_code",
+            None,
+        )
+
+        return status_code in {
+            401,
+            403,
+            408,
+            429,
+            500,
+            502,
+            503,
+            504,
+        }
+
+    def _build_params(
         self,
         messages: List[Dict[str, str]],
-        **kwargs
-    ) -> str:
-        """
-        调用 AI 模型进行对话
+        kwargs: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """构建 LiteLLM 调用参数。"""
 
-        Args:
-            messages: 消息列表，格式: [{"role": "system/user/assistant", "content": "..."}]
-            **kwargs: 额外参数，会覆盖默认配置
-
-        Returns:
-            str: AI 响应内容
-
-        Raises:
-            Exception: API 调用失败时抛出异常
-        """
-        # 构建请求参数
         params = {
             "model": self.model,
             "messages": messages,
-            "temperature": kwargs.get("temperature", self.temperature),
-            "timeout": kwargs.get("timeout", self.timeout),
-            "num_retries": kwargs.get("num_retries", self.num_retries),
+            "temperature": kwargs.get(
+                "temperature",
+                self.temperature,
+            ),
+            "timeout": kwargs.get(
+                "timeout",
+                self.timeout,
+            ),
+            "num_retries": kwargs.get(
+                "num_retries",
+                self.num_retries,
+            ),
         }
 
-        # 添加 API Key
-        if self.api_key:
-            params["api_key"] = self.api_key
-
-        # 添加 API Base（如果配置了）
         if self.api_base:
             params["api_base"] = self.api_base
 
-        # 添加 max_tokens（如果配置了且不为 0）
-        max_tokens = kwargs.get("max_tokens", self.max_tokens)
+        max_tokens = kwargs.get(
+            "max_tokens",
+            self.max_tokens,
+        )
+
         if max_tokens and max_tokens > 0:
             params["max_tokens"] = max_tokens
 
-        # 添加 fallback 模型（如果配置了）
         if self.fallback_models:
-            params["fallbacks"] = self.fallback_models
+            params["fallbacks"] = (
+                self.fallback_models
+            )
 
-        # 合并其他额外参数
         for key, value in kwargs.items():
             if key not in params:
                 params[key] = value
 
-        # 调用 LiteLLM
-        response = completion(**params)
+        return params
 
-        # 提取响应内容
-        # 某些模型/提供商返回 list（内容块）而非 str，统一转为 str
-        content = response.choices[0].message.content
+    @staticmethod
+    def _extract_content(response) -> str:
+        """统一提取 LiteLLM 返回内容。"""
+
+        content = (
+            response
+            .choices[0]
+            .message
+            .content
+        )
+
         if isinstance(content, list):
             content = "\n".join(
-                item.get("text", str(item)) if isinstance(item, dict) else str(item)
+                item.get("text", str(item))
+                if isinstance(item, dict)
+                else str(item)
                 for item in content
             )
+
         return content or ""
 
-    def validate_config(self) -> tuple[bool, str]:
+    def chat(
+        self,
+        messages: List[Dict[str, str]],
+        **kwargs,
+    ) -> str:
         """
-        验证配置是否有效
+        调用 AI。
 
-        Returns:
-            tuple: (是否有效, 错误信息)
+        调用顺序：
+        1. AI_API_KEY
+        2. AI_API_KEY_FALLBACK
+
+        只有适合 Key 切换的异常才使用备用 Key。
         """
+
+        base_params = self._build_params(
+            messages,
+            kwargs,
+        )
+
+        api_keys = []
+
+        if self.api_key:
+            api_keys.append(
+                ("主", self.api_key)
+            )
+
+        if (
+            self.fallback_api_key
+            and self.fallback_api_key
+            != self.api_key
+        ):
+            api_keys.append(
+                (
+                    "备用",
+                    self.fallback_api_key,
+                )
+            )
+
+        if not api_keys:
+            raise ValueError(
+                "未配置 AI API Key"
+            )
+
+        last_exception = None
+
+        for index, (
+            key_name,
+            api_key,
+        ) in enumerate(api_keys):
+
+            params = dict(base_params)
+            params["api_key"] = api_key
+
+            try:
+                if index > 0:
+                    print(
+                        "[AI] 正在使用备用 API Key"
+                    )
+
+                response = completion(
+                    **params
+                )
+
+                if index > 0:
+                    print(
+                        "[AI] 备用 API Key 调用成功"
+                    )
+
+                return self._extract_content(
+                    response
+                )
+
+            except Exception as exc:
+                last_exception = exc
+
+                has_next_key = (
+                    index
+                    < len(api_keys) - 1
+                )
+
+                if (
+                    has_next_key
+                    and self._should_switch_api_key(
+                        exc
+                    )
+                ):
+                    print(
+                        "[AI] 主 API Key 调用失败，"
+                        "准备切换备用 Key："
+                        f"{type(exc).__name__}"
+                    )
+                    continue
+
+                raise
+
+        if last_exception:
+            raise last_exception
+
+        raise RuntimeError(
+            "AI API 调用失败"
+        )
+
+    def validate_config(
+        self,
+    ) -> tuple[bool, str]:
+        """验证配置是否有效。"""
+
         if not self.model:
-            return False, "未配置 AI 模型（model）"
+            return (
+                False,
+                "未配置 AI 模型（model）",
+            )
 
-        if not self.api_key:
-            return False, "未配置 AI API Key，请在 config.yaml 或环境变量 AI_API_KEY 中设置"
+        if (
+            not self.api_key
+            and not self.fallback_api_key
+        ):
+            return (
+                False,
+                (
+                    "未配置 AI API Key，"
+                    "请设置 AI_API_KEY "
+                    "或 AI_API_KEY_FALLBACK"
+                ),
+            )
 
-        # 验证模型格式（应该包含 provider/model）
         if "/" not in self.model:
-            return False, f"模型格式错误: {self.model}，应为 'provider/model' 格式（如 'deepseek/deepseek-chat'）"
+            return (
+                False,
+                (
+                    f"模型格式错误: "
+                    f"{self.model}，"
+                    "应为 "
+                    "'provider/model' 格式"
+                ),
+            )
 
         return True, ""
