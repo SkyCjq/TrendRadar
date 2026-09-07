@@ -18,6 +18,11 @@ RSS 抓取器
    如果已经发现真实 m.piaoxingqiu.com 项目链接，但 GitHub Actions
    请求返回 469，则保留项目 URL、lssId 和“自动读取受限”状态，
    而不是把该项目整体丢弃。
+
+5. RSSHub 容灾
+   RSSHub 主实例失败时仅尝试一个备用实例；连续 2 个 RSSHub feed
+   均失败后，本轮触发熔断，后续 RSSHub feed 快速跳过，避免单一
+   公共实例故障拖死整个 GitHub Actions 任务。
 """
 
 import html
@@ -89,8 +94,11 @@ class _VisibleTextParser(HTMLParser):
 class RSSFetcher:
     """RSS 抓取器"""
 
-    RSSHUB_FALLBACK_FROM = "https://rsshub.app/"
-    RSSHUB_FALLBACK_TO = "https://rsshub.rss3.workers.dev/"
+    RSSHUB_BASES = (
+        "https://rsshub.rss3.workers.dev/",
+        "https://rsshub.app/",
+    )
+    RSSHUB_CIRCUIT_BREAKER_THRESHOLD = 2
 
     TICKET_STRONG_WORDS = (
         "购票",
@@ -195,6 +203,11 @@ class RSSFetcher:
         self.timezone = timezone
         self.freshness_enabled = freshness_enabled
         self.default_max_age_days = default_max_age_days
+
+        # RSSHub 熔断状态只在当前进程/当前抓取轮次使用，不做持久化。
+        self._rsshub_consecutive_failures = 0
+        self._rsshub_circuit_open = False
+
         self.parser = RSSParser()
         self.session = self._create_session()
 
@@ -247,6 +260,107 @@ class RSSFetcher:
             }
 
         return session
+
+    @staticmethod
+    def _is_rsshub_url(url: str) -> bool:
+        """判断 URL 是否属于本项目支持的 RSSHub 公共实例。"""
+
+        host = (urlparse(url).hostname or "").lower()
+        return host in {
+            "rsshub.rss3.workers.dev",
+            "rsshub.app",
+        }
+
+    @classmethod
+    def _alternate_rsshub_url(cls, url: str) -> Optional[str]:
+        """
+        为 RSSHub URL 生成唯一备用实例地址。
+
+        不做多实例循环；每个 feed 最多尝试：
+        当前配置实例 -> 另一个公共实例。
+        """
+
+        for current_base in cls.RSSHUB_BASES:
+            if not url.startswith(current_base):
+                continue
+
+            for alternate_base in cls.RSSHUB_BASES:
+                if alternate_base == current_base:
+                    continue
+
+                return url.replace(
+                    current_base,
+                    alternate_base,
+                    1,
+                )
+
+        return None
+
+    def _request_feed_response(
+        self,
+        feed: RSSFeedConfig,
+    ) -> requests.Response:
+        """
+        请求 RSS feed。
+
+        普通 RSS：
+        - 直接请求，失败交给 fetch_feed() 记录。
+
+        RSSHub：
+        - 当前实例失败后，仅尝试一个备用实例；
+        - 两个实例都失败时返回异常，由 fetch_all() 计入熔断。
+        """
+
+        request_url = feed.url
+
+        try:
+            response = self.session.get(
+                request_url,
+                timeout=(10, self.timeout),
+                allow_redirects=True,
+            )
+            response.raise_for_status()
+            return response
+
+        except requests.RequestException as primary_exc:
+            if not self._is_rsshub_url(request_url):
+                raise
+
+            fallback_url = self._alternate_rsshub_url(
+                request_url
+            )
+
+            if not fallback_url:
+                raise
+
+            print(
+                f"[RSS] {feed.name}: "
+                "RSSHub 主实例请求失败，"
+                "仅尝试一次备用实例 -> "
+                f"{fallback_url}"
+            )
+
+            try:
+                fallback_response = self.session.get(
+                    fallback_url,
+                    timeout=(10, self.timeout),
+                    allow_redirects=True,
+                )
+                fallback_response.raise_for_status()
+
+                print(
+                    f"[RSS] {feed.name}: "
+                    "RSSHub 备用实例请求成功"
+                )
+
+                return fallback_response
+
+            except requests.RequestException as fallback_exc:
+                raise requests.RequestException(
+                    "RSSHub 主实例与备用实例均失败；"
+                    f"主实例={request_url}: {primary_exc}; "
+                    f"备用实例={fallback_url}: {fallback_exc}"
+                ) from fallback_exc
 
     @staticmethod
     def _normalize_author(author: str) -> str:
@@ -446,7 +560,7 @@ class RSSFetcher:
         # 球员生日、履历日期、历史赛季日期等，不能把这些日期误当发布时间。
         if feed.allowed_authors:
             return False, None
-           
+
         # keyword RSS 的 published_at 可能缺失，也可能并不可靠地代表微博原始发布时间。
         # 因此只要正文里存在明确日期，就优先用正文日期做“明显过旧”兜底；
         # 如果正文没有明确日期，再交给 TrendRadar 原有 published_at freshness 逻辑。
@@ -1067,40 +1181,7 @@ class RSSFetcher:
         """抓取单个 RSS 源"""
 
         try:
-            request_url = feed.url
-
-            response = self.session.get(
-                request_url,
-                timeout=(10, self.timeout),
-                allow_redirects=True,
-            )
-
-            if (
-                response.status_code == 403
-                and request_url.startswith(
-                    self.RSSHUB_FALLBACK_FROM
-                )
-            ):
-                fallback_url = request_url.replace(
-                    self.RSSHUB_FALLBACK_FROM,
-                    self.RSSHUB_FALLBACK_TO,
-                    1,
-                )
-
-                print(
-                    f"[RSS] {feed.name}: "
-                    "rsshub.app 返回403，"
-                    "尝试备用实例: "
-                    f"{fallback_url}"
-                )
-
-                response = self.session.get(
-                    fallback_url,
-                    timeout=(10, self.timeout),
-                    allow_redirects=True,
-                )
-
-            response.raise_for_status()
+            response = self._request_feed_response(feed)
 
             content_type = response.headers.get(
                 "Content-Type",
@@ -1289,14 +1370,61 @@ class RSSFetcher:
             f"{len(self.feeds)} 个 RSS 源..."
         )
 
+        # 每次 fetch_all() 都重新开始一轮熔断状态。
+        self._rsshub_consecutive_failures = 0
+        self._rsshub_circuit_open = False
+
         for index, feed in enumerate(self.feeds):
+            id_to_name[feed.id] = feed.name
+            is_rsshub = self._is_rsshub_url(feed.url)
+
+            if self._rsshub_circuit_open and is_rsshub:
+                print(
+                    f"[RSS熔断] {feed.name}: "
+                    "RSSHub 本轮已熔断，跳过网络请求"
+                )
+                failed_ids.append(feed.id)
+                continue
+
             if index > 0:
                 interval = self.request_interval / 1000
                 jitter = random.uniform(-0.2, 0.2) * interval
                 time.sleep(max(0, interval + jitter))
 
             items, error = self.fetch_feed(feed)
-            id_to_name[feed.id] = feed.name
+
+            if is_rsshub:
+                if error:
+                    self._rsshub_consecutive_failures += 1
+
+                    print(
+                        f"[RSS熔断] {feed.name}: "
+                        "RSSHub 连续失败计数="
+                        f"{self._rsshub_consecutive_failures}/"
+                        f"{self.RSSHUB_CIRCUIT_BREAKER_THRESHOLD}"
+                    )
+
+                    if (
+                        self._rsshub_consecutive_failures
+                        >= self.RSSHUB_CIRCUIT_BREAKER_THRESHOLD
+                    ):
+                        self._rsshub_circuit_open = True
+
+                        print(
+                            "[RSS熔断] RSSHub 已连续失败 "
+                            f"{self._rsshub_consecutive_failures} 个源，"
+                            "本轮停止请求其余 RSSHub feed；"
+                            "其他 RSS 与后续 AI/推送流程继续"
+                        )
+
+                else:
+                    if self._rsshub_consecutive_failures > 0:
+                        print(
+                            f"[RSS熔断] {feed.name}: "
+                            "RSSHub 请求恢复，连续失败计数归零"
+                        )
+
+                    self._rsshub_consecutive_failures = 0
 
             if error:
                 failed_ids.append(feed.id)
