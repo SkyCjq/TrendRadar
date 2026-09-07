@@ -51,7 +51,8 @@ permissions:
 jobs:
   crawl:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # v0.90: RSSHub 故障降级后仍给 AI 分析/推送留出总运行余量。
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
