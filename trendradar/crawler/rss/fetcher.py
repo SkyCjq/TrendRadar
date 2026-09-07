@@ -221,11 +221,11 @@ class RSSFetcher:
         )
 
         retry = Retry(
-            total=4,
-            connect=4,
-            read=4,
-            status=4,
-            backoff_factor=2,
+            total=1,
+            connect=1,
+            read=1,
+            status=1,
+            backoff_factor=0.5,
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=frozenset(["GET", "HEAD"]),
             respect_retry_after_header=True,
