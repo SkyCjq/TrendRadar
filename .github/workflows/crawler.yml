@@ -175,6 +175,22 @@ jobs:
         run: uv run python -m trendradar
 
       # --------------------------------------------------------------------------------
+      # 📦 TREND RADAR RUN ARTIFACT / 运行产物持久化（v1.02）
+      # --------------------------------------------------------------------------------
+      # 将本次 run 的 Markdown / JSON / HTML 摘要保存为 GitHub Actions Artifact。
+      # 该产物与 GitHub run_id 绑定，供 ChatGPT / Connector / 人工审计读取，
+      # 不写回 master，不影响 B2/S3 历史数据库，也不改变现有 DingTalk 推送。
+      - name: Upload TrendRadar run artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trendradar-run-${{ github.run_id }}
+          path: output/run_summary/
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
+
+      # --------------------------------------------------------------------------------
       # ☁️ CLOUDFLARE PAGES DEPLOY / 部署到 Cloudflare Pages（可选）
       # --------------------------------------------------------------------------------
       # 将爬虫生成的 index.html 自动部署到 Cloudflare Pages，国内访问比 GitHub Pages 更快。
