@@ -6,6 +6,7 @@ AI 分析结果格式化模块
 """
 
 import html as html_lib
+import json
 import re
 from .analyzer import AIAnalysisResult
 
@@ -15,18 +16,56 @@ def _escape_html(text: str) -> str:
     return html_lib.escape(text) if text else ""
 
 
-def _format_list_content(text: str) -> str:
+def _coerce_ai_text(value) -> str:
     """
-    格式化列表内容，确保序号前有换行
-    例如将 "1. xxx 2. yyy" 转换为:
-    1. xxx
-    2. yyy
+    将 AI 返回的文本字段防御性转换为字符串。
+
+    Prompt 要求字符串，但模型偶尔会返回 JSON list/tuple/dict。
+    渲染层统一兼容这些类型，避免对 list 直接调用 strip()。
     """
+    if value is None:
+        return ""
+
+    if isinstance(value, str):
+        return value.strip()
+
+    if isinstance(value, (list, tuple)):
+        lines = []
+        for index, item in enumerate(value, start=1):
+            if item is None:
+                continue
+
+            if isinstance(item, str):
+                text = item.strip()
+            else:
+                try:
+                    text = json.dumps(item, ensure_ascii=False)
+                except (TypeError, ValueError):
+                    text = str(item)
+                text = text.strip()
+
+            if text:
+                lines.append(f"{index}. {text}")
+
+        return "\n".join(lines)
+
+    if isinstance(value, dict):
+        try:
+            return json.dumps(value, ensure_ascii=False).strip()
+        except (TypeError, ValueError):
+            return str(value).strip()
+
+    return str(value).strip()
+
+
+def _format_list_content(text) -> str:
+    """
+    格式化列表内容，确保序号前有换行。
+    同时兼容模型偶发返回的 list/tuple/dict。
+    """
+    text = _coerce_ai_text(text)
     if not text:
         return ""
-    
-    # 去除首尾空白，防止 AI 返回的内容开头就有换行导致显示空行
-    text = text.strip()
 
     # 0. 合并序号与紧随的【标签】（防御性处理）
     # 将 "1.\n【投资者】：" 或 "1. 【投资者】：" 合并为 "1. 投资者："
@@ -38,7 +77,7 @@ def _format_list_content(text: str) -> str:
     # 2. 强制换行：匹配 "数字."，且前面不是换行符
     #    (?!\d) 排除版本号/小数（如 2.0、3.5），避免将其误判为列表序号
     result = re.sub(r'(?<=[^\n])\s+(\d+\.)(?!\d)', r'\n\1', result)
-    
+
     # 3. 处理 "1.**粗体**" 这种情况（虽然 Prompt 要求不输出 Markdown，但防御性处理）
     result = re.sub(r'(?<=[^\n])(\d+\.\*\*)', r'\n\1', result)
 
@@ -80,8 +119,11 @@ def _format_standalone_summaries(
         return ""
     lines = []
     for source_name, summary in summaries.items():
-        if summary:
-            lines.append(f"{bracket_left}{source_name}{bracket_right}:\n{summary}")
+        summary_text = _coerce_ai_text(summary)
+        if summary_text:
+            lines.append(
+                f"{bracket_left}{source_name}{bracket_right}:\n{summary_text}"
+            )
     return "\n\n".join(lines)
 
 
