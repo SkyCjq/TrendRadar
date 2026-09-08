@@ -7,8 +7,12 @@
 - generate_html_report: 生成 HTML 报告
 """
 
+import json
+import shutil
+from dataclasses import fields, is_dataclass
+from datetime import date, datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Callable
+from typing import Any, Callable, Dict, List, Optional
 
 
 def prepare_report_data(
@@ -244,3 +248,448 @@ def generate_html_report(
         f.write(html_content)
 
     return snapshot_file
+
+# === v1.02: GitHub Actions Run Summary Artifact ===
+
+RUN_SUMMARY_SCHEMA_VERSION = "1.0"
+
+
+def _json_safe(value: Any) -> Any:
+    """将运行期对象转换为稳定、可 JSON 序列化的数据。"""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if is_dataclass(value):
+        return {
+            field.name: _json_safe(getattr(value, field.name))
+            for field in fields(value)
+        }
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, set):
+        return sorted((_json_safe(item) for item in value), key=str)
+    return str(value)
+
+
+def _serialize_ai_analysis(ai_analysis: Any, enabled: bool) -> Dict[str, Any]:
+    """
+    序列化 AI 分析结果。
+
+    raw_response 明确不进入 Artifact：
+    - 避免与结构化 AI 字段重复；
+    - 避免把 Provider 原始响应/调试内容当成稳定数据契约。
+    """
+    result = {
+        "enabled": bool(enabled),
+        "present": ai_analysis is not None,
+        "success": False,
+        "skipped": False,
+        "error": "",
+        "ai_mode": "",
+        "core_trends": "",
+        "sentiment_controversy": "",
+        "signals": "",
+        "rss_insights": "",
+        "outlook_strategy": "",
+        "standalone_summaries": {},
+        "counts": {},
+    }
+
+    if ai_analysis is None:
+        return result
+
+    for key in (
+        "success",
+        "skipped",
+        "error",
+        "ai_mode",
+        "core_trends",
+        "sentiment_controversy",
+        "signals",
+        "rss_insights",
+        "outlook_strategy",
+        "standalone_summaries",
+    ):
+        result[key] = _json_safe(getattr(ai_analysis, key, result[key]))
+
+    count_keys = (
+        "total_news",
+        "analyzed_news",
+        "max_news_limit",
+        "hotlist_count",
+        "rss_count",
+        "hotlist_analyzed",
+        "rss_analyzed",
+        "standalone_analyzed",
+        "include_rss",
+        "include_standalone",
+    )
+    result["counts"] = {
+        key: _json_safe(getattr(ai_analysis, key, 0))
+        for key in count_keys
+    }
+    return result
+
+
+def _normalize_rss_raw_items(items: Optional[List[Dict]]) -> List[Dict]:
+    """保留跨系统复用所需的 RSS 证据字段，不复制数据库对象。"""
+    normalized = []
+    for item in items or []:
+        normalized.append(
+            {
+                "title": item.get("title", ""),
+                "feed_id": item.get("feed_id", ""),
+                "feed_name": item.get("feed_name", ""),
+                "url": item.get("url", ""),
+                "published_at": _json_safe(item.get("published_at", "")),
+                "author": item.get("author", ""),
+                "summary": item.get("summary", ""),
+            }
+        )
+    return normalized
+
+
+def _filter_rss_raw_items_for_stats(
+    items: Optional[List[Dict]],
+    stats: Optional[List[Dict]],
+) -> List[Dict]:
+    """只保留最终 RSS 统计中实际出现的原始条目，避免把未匹配候选误当成报告正文。"""
+    urls = set()
+    titles = set()
+    for stat in stats or []:
+        for item in stat.get("titles", []) or []:
+            url = item.get("mobile_url") or item.get("mobileUrl") or item.get("url", "")
+            title = item.get("title", "")
+            if url:
+                urls.add(url)
+            if title:
+                titles.add(title)
+
+    if not urls and not titles:
+        return []
+
+    selected = []
+    for item in items or []:
+        url = item.get("url", "")
+        title = item.get("title", "")
+        if (url and url in urls) or (title and title in titles):
+            selected.append(item)
+    return selected
+
+
+def _markdown_link(title: str, url: str) -> str:
+    safe_title = str(title or "").replace("]", r"\]")
+    if url:
+        return f"[{safe_title}]({url})"
+    return safe_title
+
+
+def _render_stat_groups_markdown(stats: List[Dict]) -> List[str]:
+    lines: List[str] = []
+    if not stats:
+        lines.append("_当前摘要数据中无匹配条目。_")
+        return lines
+
+    for stat in stats:
+        word = stat.get("word", "未分组")
+        titles = stat.get("titles", [])
+        lines.append(f"### {word} ({len(titles)} 条)")
+        for item in titles:
+            title = item.get("title", "")
+            source = item.get("source_name", "")
+            url = item.get("mobile_url") or item.get("mobileUrl") or item.get("url", "")
+            ranks = item.get("ranks", [])
+            rank_text = f" · rank={ranks[-1]}" if ranks else ""
+            source_text = f" · {source}" if source else ""
+            new_text = " · NEW" if item.get("is_new") else ""
+            lines.append(
+                f"- {_markdown_link(title, url)}{source_text}{rank_text}{new_text}"
+            )
+        lines.append("")
+    return lines
+
+
+def _render_ai_markdown(ai: Dict[str, Any]) -> List[str]:
+    lines: List[str] = []
+    if not ai.get("enabled"):
+        return ["_AI 分析未启用。_", ""]
+    if not ai.get("present"):
+        return ["_本轮没有生成 AI 分析结果。_", ""]
+    if ai.get("skipped"):
+        return [f"_AI 分析跳过：{ai.get('error') or '无可分析内容'}_", ""]
+    if not ai.get("success"):
+        return [f"_AI 分析失败：{ai.get('error') or 'unknown error'}_", ""]
+
+    sections = (
+        ("核心热点与舆情态势", "core_trends"),
+        ("舆论风向与争议", "sentiment_controversy"),
+        ("异动与弱信号", "signals"),
+        ("RSS 深度洞察", "rss_insights"),
+        ("研判与策略建议", "outlook_strategy"),
+    )
+    for title, key in sections:
+        content = str(ai.get(key, "") or "").strip()
+        if content:
+            lines.extend([f"### {title}", content, ""])
+
+    standalone = ai.get("standalone_summaries") or {}
+    if standalone:
+        lines.append("### 独立源摘要")
+        for source_id, summary in standalone.items():
+            lines.append(f"- **{source_id}**：{summary}")
+        lines.append("")
+
+    if len(lines) == 0:
+        lines.extend(["_AI 分析成功，但没有可展示的结构化文本。_", ""])
+    return lines
+
+
+def _render_standalone_markdown(standalone: Optional[Dict]) -> List[str]:
+    lines: List[str] = []
+    data = standalone or {}
+
+    for platform in data.get("platforms", []) or []:
+        lines.append(f"### {platform.get('name', platform.get('id', '平台'))}")
+        for item in platform.get("items", []) or []:
+            url = item.get("mobileUrl") or item.get("url", "")
+            lines.append(f"- {_markdown_link(item.get('title', ''), url)}")
+        lines.append("")
+
+    for feed in data.get("rss_feeds", []) or []:
+        lines.append(f"### {feed.get('name', feed.get('id', 'RSS'))}")
+        for item in feed.get("items", []) or []:
+            published = item.get("published_at", "")
+            suffix = f" · {published}" if published else ""
+            lines.append(
+                f"- {_markdown_link(item.get('title', ''), item.get('url', ''))}{suffix}"
+            )
+        lines.append("")
+
+    if not lines:
+        lines.append("_本轮没有独立展示区数据。_")
+        lines.append("")
+    return lines
+
+
+def generate_run_summary(
+    stats: List[Dict],
+    failed_ids: Optional[List] = None,
+    new_titles: Optional[Dict] = None,
+    id_to_name: Optional[Dict] = None,
+    mode: str = "daily",
+    rank_threshold: int = 3,
+    show_new_section: bool = True,
+    ai_analysis: Any = None,
+    ai_enabled: bool = False,
+    rss_stats: Optional[List[Dict]] = None,
+    rss_new_stats: Optional[List[Dict]] = None,
+    raw_rss_items: Optional[List[Dict]] = None,
+    rss_failed_ids: Optional[List[str]] = None,
+    standalone_data: Optional[Dict] = None,
+    report_metadata: Optional[Dict] = None,
+    run_metadata: Optional[Dict] = None,
+    generated_at: str = "",
+    timezone: str = "",
+    html_file_path: Optional[str] = None,
+    output_dir: str = "output/run_summary",
+) -> Dict[str, str]:
+    """
+    生成 GitHub Actions 可读取的 Markdown / JSON / HTML 运行快照。
+
+    该函数只消费本轮已经产生的结构化数据，不抓取网络、不读取 B2、
+    不重新执行关键词分析，也不会再次调用 AI。
+    """
+    summary_dir = Path(output_dir)
+    summary_dir.mkdir(parents=True, exist_ok=True)
+
+    hotlist_report = prepare_report_data(
+        stats=stats or [],
+        failed_ids=failed_ids,
+        new_titles=new_titles,
+        id_to_name=id_to_name,
+        mode=mode,
+        rank_threshold=rank_threshold,
+        show_new_section=show_new_section,
+    )
+    normalized_rss_stats = _json_safe(rss_stats or [])
+    normalized_rss_new_stats = _json_safe(rss_new_stats or [])
+    matched_raw_rss_items = _filter_rss_raw_items_for_stats(raw_rss_items, rss_stats)
+    normalized_raw_rss = _normalize_rss_raw_items(matched_raw_rss_items)
+    normalized_standalone = _json_safe(
+        standalone_data or {"platforms": [], "rss_feeds": []}
+    )
+    ai_payload = _serialize_ai_analysis(ai_analysis, ai_enabled)
+
+    metadata = report_metadata or {}
+    hotlist_failed_ids = list(failed_ids or [])
+    rss_failed_ids = list(rss_failed_ids or [])
+
+    # AI 已配置但本轮缺失 / 跳过 / 失败时，正文覆盖不完整，标记为 PARTIAL。
+    ai_incomplete = (
+        ai_payload.get("enabled")
+        and not ai_payload.get("success")
+    )
+    overall = (
+        "PARTIAL"
+        if hotlist_failed_ids or rss_failed_ids or ai_incomplete
+        else "OK"
+    )
+
+    payload = {
+        "schema_version": RUN_SUMMARY_SCHEMA_VERSION,
+        "generated_at": generated_at,
+        "timezone": timezone,
+        "report_mode": mode,
+        "run": _json_safe(run_metadata or {}),
+        "health": {
+            "overall": overall,
+            "hotlist": {
+                "platform_total": metadata.get("platform_total", 0),
+                "total_count": metadata.get("hotlist_total", 0),
+                "failed_platform_ids": hotlist_failed_ids,
+            },
+            "rss": {
+                "source_total": metadata.get("rss_source_total", 0),
+                "source_failed": metadata.get("rss_source_failed", len(rss_failed_ids)),
+                "failed_source_ids": rss_failed_ids,
+                "matched_count": metadata.get("rss_matched_count", 0),
+                "total_count": metadata.get("rss_total_count", len(normalized_raw_rss)),
+            },
+            "ai": {
+                "enabled": ai_payload.get("enabled", False),
+                "present": ai_payload.get("present", False),
+                "success": ai_payload.get("success", False),
+                "skipped": ai_payload.get("skipped", False),
+                "error": ai_payload.get("error", ""),
+            },
+        },
+        "ai_analysis": ai_payload,
+        "hotlist": {
+            "stats": hotlist_report["stats"],
+            "new_titles": hotlist_report["new_titles"],
+            "total_new_count": hotlist_report["total_new_count"],
+        },
+        "rss": {
+            "stats": normalized_rss_stats,
+            "new_stats": normalized_rss_new_stats,
+            "items": normalized_raw_rss,
+        },
+        "standalone": normalized_standalone,
+    }
+
+    json_path = summary_dir / "run_summary.json"
+    json_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    run = payload["run"]
+    md: List[str] = [
+        "# TrendRadar Run Summary",
+        "",
+        "## Run",
+        f"- Run ID: `{run.get('id', '')}`",
+        f"- Run Number: `{run.get('number', '')}`",
+        f"- Run Attempt: `{run.get('attempt', '')}`",
+        f"- Event: `{run.get('event', '')}`",
+        f"- SHA: `{run.get('sha', '')}`",
+        f"- Ref: `{run.get('ref', '')}`",
+        f"- Report Mode: `{mode}`",
+        f"- Generated At: `{generated_at}`",
+        f"- Timezone: `{timezone}`",
+        "",
+        "## Data Health",
+        f"- Overall: **{overall}**",
+        (
+            "- Hotlist: "
+            f"{metadata.get('platform_total', 0)} platforms; "
+            f"failed={len(hotlist_failed_ids)}"
+        ),
+        (
+            "- RSS: "
+            f"{metadata.get('rss_source_total', 0)} sources; "
+            f"failed={metadata.get('rss_source_failed', len(rss_failed_ids))}; "
+            f"matched={metadata.get('rss_matched_count', 0)}"
+        ),
+        (
+            "- AI: "
+            + (
+                "success"
+                if ai_payload.get("success")
+                else "skipped"
+                if ai_payload.get("skipped")
+                else "failed"
+                if ai_incomplete and ai_payload.get("present")
+                else "not-run"
+            )
+        ),
+        "",
+        "## AI Analysis",
+        "",
+    ]
+    md.extend(_render_ai_markdown(ai_payload))
+
+    md.extend(["## Hotlist", ""])
+    md.extend(_render_stat_groups_markdown(hotlist_report["stats"]))
+
+    md.extend(["## RSS", ""])
+    md.extend(_render_stat_groups_markdown(rss_stats or []))
+
+    md.extend(["## Official / Standalone", ""])
+    md.extend(_render_standalone_markdown(standalone_data))
+
+    md.extend(["## Coverage Gaps", ""])
+    if not hotlist_failed_ids and not rss_failed_ids:
+        md.append("_本轮没有记录到数据源抓取失败。_")
+    else:
+        if hotlist_failed_ids:
+            md.append(
+                "- Hotlist failed: "
+                + ", ".join(f"`{item}`" for item in hotlist_failed_ids)
+            )
+        if rss_failed_ids:
+            md.append(
+                "- RSS failed / circuit-skipped: "
+                + ", ".join(f"`{item}`" for item in rss_failed_ids)
+            )
+        md.append("")
+        md.append(
+            "> 数据源失败表示覆盖不完整；不得据此推断对应领域“没有新闻”。"
+        )
+    md.append("")
+
+    md_path = summary_dir / "run_summary.md"
+    md_path.write_text("\n".join(md).rstrip() + "\n", encoding="utf-8")
+
+    # 复用本轮已经生成的 HTML，不重新渲染。
+    copied_index = ""
+    root_index = Path("index.html")
+    if root_index.is_file():
+        target = summary_dir / "index.html"
+        shutil.copy2(root_index, target)
+        copied_index = str(target)
+
+    copied_latest = ""
+    latest_source = Path("output") / "html" / "latest" / f"{mode}.html"
+    if not latest_source.is_file() and html_file_path:
+        fallback_html = Path(html_file_path)
+        if fallback_html.is_file():
+            latest_source = fallback_html
+
+    if latest_source.is_file():
+        target = summary_dir / "latest.html"
+        shutil.copy2(latest_source, target)
+        copied_latest = str(target)
+
+    return {
+        "json": str(json_path),
+        "markdown": str(md_path),
+        "index_html": copied_index,
+        "latest_html": copied_latest,
+    }
+
