@@ -83,6 +83,7 @@ class NewsAnalyzer:
         # RSS/平台元数据（用于报告头部展示）
         self._rss_source_total = 0
         self._rss_source_failed = 0
+        self._rss_failed_ids = []  # v1.02: 本轮 RSS 失败/熔断源 ID，供 Artifact 健康状态使用
         self._rss_total_count = 0
         self._rss_matched_count = 0
         self._hotlist_total_count = 0
@@ -718,7 +719,10 @@ class NewsAnalyzer:
         # AI 分析（如果启用，用于 HTML 报告）
         ai_result = None
         ai_config = self.ctx.config.get("AI_ANALYSIS", {})
-        if ai_config.get("ENABLED", False) and stats:
+        # v1.02: 热榜或 RSS 任一有内容时，都在主分析流水线统一生成 ai_result。
+        # 这样 HTML / Run Summary / DingTalk 复用同一个结果；RSS-only 场景不需要
+        # 在通知阶段再额外调用一次 Gemini。
+        if ai_config.get("ENABLED", False) and (stats or rss_items):
             # 获取模式策略来确定报告类型
             mode_strategy = self._get_mode_strategy()
             report_type = mode_strategy["report_type"]
@@ -997,6 +1001,9 @@ class NewsAnalyzer:
             - rss_new_urls: 原始新增 RSS 条目的 URL 集合（用于 AI 模式 is_new 检测）
             如果未启用或失败返回 (None, None, None, set())
         """
+        # v1.02: 每轮重置 RSS 失败 ID，避免进程内重复执行时沿用上一轮状态。
+        self._rss_failed_ids = []
+
         if not self.ctx.rss_enabled:
             return None, None, None, set()
 
@@ -1182,6 +1189,7 @@ class NewsAnalyzer:
 
             self._rss_source_total = len(feeds)
             self._rss_source_failed = len(rss_data.failed_ids)
+            self._rss_failed_ids = list(rss_data.failed_ids)
 
             # 保存到存储后端
             if self.storage_manager.save_rss_data(rss_data):
@@ -1500,6 +1508,82 @@ class NewsAnalyzer:
             print(f"[RSS] 生成 HTML 报告失败: {e}")
             return None
 
+    def _export_run_summary(
+        self,
+        stats: List[Dict],
+        failed_ids: Optional[List] = None,
+        new_titles: Optional[Dict] = None,
+        id_to_name: Optional[Dict] = None,
+        html_file: Optional[str] = None,
+        ai_result: Optional[AIAnalysisResult] = None,
+        rss_items: Optional[List[Dict]] = None,
+        rss_new_items: Optional[List[Dict]] = None,
+        raw_rss_items: Optional[List[Dict]] = None,
+        standalone_data: Optional[Dict] = None,
+    ) -> Dict[str, str]:
+        """v1.02: 导出与本次 GitHub Actions run 绑定的 Markdown/JSON/HTML 摘要。"""
+        from trendradar.report.generator import generate_run_summary
+
+        def _env_int(name: str):
+            value = os.environ.get(name, "").strip()
+            if not value:
+                return None
+            try:
+                return int(value)
+            except ValueError:
+                return value
+
+        run_metadata = {
+            "id": _env_int("GITHUB_RUN_ID"),
+            "number": _env_int("GITHUB_RUN_NUMBER"),
+            "attempt": _env_int("GITHUB_RUN_ATTEMPT"),
+            "event": os.environ.get("GITHUB_EVENT_NAME", ""),
+            "sha": os.environ.get("GITHUB_SHA", ""),
+            "ref": os.environ.get("GITHUB_REF", ""),
+            "ref_name": os.environ.get("GITHUB_REF_NAME", ""),
+            "repository": os.environ.get("GITHUB_REPOSITORY", ""),
+        }
+
+        report_metadata = {
+            "hotlist_total": self._hotlist_total_count,
+            "platform_total": len(self.ctx.platform_ids),
+            "rss_matched_count": self._rss_matched_count,
+            "rss_total_count": self._rss_total_count,
+            "rss_source_total": self._rss_source_total,
+            "rss_source_failed": self._rss_source_failed,
+        }
+
+        ai_enabled = self.ctx.config.get("AI_ANALYSIS", {}).get("ENABLED", False)
+        paths = generate_run_summary(
+            stats=stats,
+            failed_ids=failed_ids,
+            new_titles=new_titles,
+            id_to_name=id_to_name,
+            mode=self.report_mode,
+            rank_threshold=self.rank_threshold,
+            show_new_section=self.ctx.show_new_section,
+            ai_analysis=ai_result,
+            ai_enabled=ai_enabled,
+            rss_stats=rss_items,
+            rss_new_stats=rss_new_items,
+            raw_rss_items=raw_rss_items,
+            rss_failed_ids=self._rss_failed_ids,
+            standalone_data=standalone_data,
+            report_metadata=report_metadata,
+            run_metadata=run_metadata,
+            generated_at=self.ctx.get_time().isoformat(),
+            timezone=self.ctx.config.get("TIMEZONE", DEFAULT_TIMEZONE),
+            html_file_path=html_file,
+        )
+
+        print(f"[Artifact] Run summary JSON: {paths['json']}")
+        print(f"[Artifact] Run summary Markdown: {paths['markdown']}")
+        if paths.get("index_html"):
+            print(f"[Artifact] HTML index: {paths['index_html']}")
+        else:
+            print("[Artifact] 警告: index.html 未生成，Artifact 将只包含可用摘要文件")
+        return paths
+
     def _execute_mode_strategy(
         self, mode_strategy: Dict, results: Dict, id_to_name: Dict, failed_ids: List,
         rss_items: Optional[List[Dict]] = None,
@@ -1689,6 +1773,21 @@ class NewsAnalyzer:
         if html_file:
             print(f"HTML报告已生成: {html_file}")
             print(f"最新报告已更新: output/html/latest/{self.report_mode}.html")
+
+        # v1.02: 在通知前持久化本轮结构化结果。
+        # 仅复用已经完成的 stats / ai_result / RSS / standalone 数据，不重复抓取或调用 AI。
+        self._export_run_summary(
+            stats=stats,
+            failed_ids=failed_ids,
+            new_titles=new_titles,
+            id_to_name=id_to_name,
+            html_file=html_file,
+            ai_result=ai_result,
+            rss_items=rss_items,
+            rss_new_items=rss_new_items,
+            raw_rss_items=raw_rss_items,
+            standalone_data=standalone_data,
+        )
 
         # 发送通知
         if mode_strategy["should_send_notification"]:
